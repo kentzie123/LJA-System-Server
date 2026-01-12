@@ -12,6 +12,7 @@ import branchRoutes from "./routes/branch.routes.js";
 import roleRoutes from "./routes/role.routes.js";
 import attendanceRoutes from "./routes/attendance.routes.js";
 import leaveRoutes from "./routes/leave.routes.js";
+import overtimeRoutes from "./routes/overtime.routes.js";
 
 const allowedOrigins = ["http://localhost:3000"];
 
@@ -46,6 +47,7 @@ app.use("/api/branches", branchRoutes);
 app.use("/api/roles", roleRoutes);
 app.use("/api/attendances", attendanceRoutes);
 app.use("/api/leave", leaveRoutes);
+app.use("/api/overtime", overtimeRoutes);
 
 app.get("/api/status", (req, res) => {
   res.json({
