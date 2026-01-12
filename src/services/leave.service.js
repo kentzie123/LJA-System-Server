@@ -1,7 +1,7 @@
 import pool from "../config/db.js";
 import { calculateDays } from "../utils/dateUtils.js";
 
-// 1. Fetch all available leave types (for the Dropdown)
+// 1. Fetch all available leave types
 export const getAllLeaveTypes = async () => {
   const result = await pool.query("SELECT * FROM leave_types ORDER BY id ASC");
   return result.rows;
@@ -18,7 +18,6 @@ export const createLeaveRequest = async (data) => {
   }
 
   // A. OVERLAP CHECK
-  // Logic: Existing Start <= New End AND Existing End >= New Start
   const overlapCheck = await pool.query(
     `SELECT * FROM leave_requests 
      WHERE user_id = $1 
@@ -34,7 +33,6 @@ export const createLeaveRequest = async (data) => {
   }
 
   // B. BALANCE CHECK
-  // Fetch balance for this User + Leave Type + Current Year
   const balanceCheck = await pool.query(
     `SELECT * FROM employee_leave_balances 
      WHERE user_id = $1 AND leave_type_id = $2 AND year = EXTRACT(YEAR FROM CURRENT_DATE)`,
@@ -43,11 +41,8 @@ export const createLeaveRequest = async (data) => {
 
   const balanceRow = balanceCheck.rows[0];
 
-  // If a balance row exists, enforce the limit.
-  // Note: If 'Unpaid Leave' has no balance row, this block skips (allowing infinite unpaid).
   if (balanceRow) {
     const remainingDays = balanceRow.allocated_days - balanceRow.used_days;
-
     if (remainingDays < daysRequested) {
       throw new Error(
         `Insufficient credits. You only have ${remainingDays} days remaining.`
@@ -87,14 +82,11 @@ export const getAllLeaves = async (userId, roleId) => {
       lr.created_at,
       lr.rejection_reason,
       
-      -- Join User Info
       u.fullname,
       u.email,
-      -- Generate Initials (e.g., "Alice Freeman" -> "AF")
       (SELECT string_agg(substring(n from 1 for 1), '') 
        FROM regexp_split_to_table(u.fullname, '\s+') as n) as initials,
 
-      -- Join Leave Type Info
       lt.name AS leave_type,
       lt.color_code,
       lt.is_paid
@@ -106,14 +98,11 @@ export const getAllLeaves = async (userId, roleId) => {
 
   const params = [];
 
-  // LOGIC: If Role is 'Staff' (ID 2), filter by their User ID.
-  // If Admin (1) or Super Admin (3), show ALL.
   if (roleId === 2) {
     query += ` WHERE lr.user_id = $1`;
     params.push(userId);
   }
 
-  // Order by newest first
   query += ` ORDER BY lr.created_at DESC`;
 
   const result = await pool.query(query, params);
@@ -121,7 +110,6 @@ export const getAllLeaves = async (userId, roleId) => {
 };
 
 export const getUserBalances = async (userId) => {
-  // Fetches allocated vs used for the current year
   const result = await pool.query(
     `SELECT 
        lb.allocated_days, 
@@ -144,7 +132,46 @@ export const getLeaveById = async (id) => {
 };
 
 export const deleteLeave = async (id) => {
-  await pool.query("DELETE FROM leave_requests WHERE id = $1", [id]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // 1. Fetch the request BEFORE deleting it
+    const res = await client.query(
+      `SELECT * FROM leave_requests WHERE id = $1`,
+      [id]
+    );
+    const request = res.rows[0];
+
+    if (!request) {
+      throw new Error("Request not found");
+    }
+
+    // 2. REFUND LOGIC: If it was Approved, give the days back!
+    if (request.status === "Approved") {
+      const days = calculateDays(request.start_date, request.end_date);
+      const leaveYear = new Date(request.start_date).getFullYear();
+
+      await client.query(
+        `UPDATE employee_leave_balances 
+         SET used_days = used_days - $1 
+         WHERE user_id = $2 
+           AND leave_type_id = $3 
+           AND year = $4`,
+        [days, request.user_id, request.leave_type_id, leaveYear]
+      );
+    }
+
+    // 3. Now it is safe to delete
+    await client.query("DELETE FROM leave_requests WHERE id = $1", [id]);
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 };
 
 export const updateLeave = async (id, data) => {
@@ -156,4 +183,59 @@ export const updateLeave = async (id, data) => {
     [leaveTypeId, startDate, endDate, reason, id]
   );
   return result.rows[0];
+};
+
+export const updateLeaveStatus = async (id, status) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // 1. Get current status BEFORE update
+    const res = await client.query(
+      `SELECT * FROM leave_requests WHERE id = $1`,
+      [id]
+    );
+    const request = res.rows[0];
+
+    // Safety check
+    if (!request) throw new Error("Request not found");
+
+    const days = calculateDays(request.start_date, request.end_date);
+    const { user_id, leave_type_id, status: oldStatus } = request; // <--- This is vital
+    const leaveYear = new Date(request.start_date).getFullYear();
+
+    // We only deduct if it wasn't approved before.
+    if (status === "Approved" && oldStatus !== "Approved") {
+      await client.query(
+        `UPDATE employee_leave_balances 
+         SET used_days = used_days + $1 
+         WHERE user_id = $2 AND leave_type_id = $3 AND year = $4`,
+        [days, user_id, leave_type_id, leaveYear]
+      );
+    }
+
+    if (oldStatus === "Approved" && status !== "Approved") {
+      await client.query(
+        `UPDATE employee_leave_balances 
+         SET used_days = used_days - $1 
+         WHERE user_id = $2 AND leave_type_id = $3 AND year = $4`,
+        [days, user_id, leave_type_id, leaveYear]
+      );
+    }
+    // ---------------------------------------------------------
+
+    // 2. Finally, update the status
+    const updateRes = await client.query(
+      `UPDATE leave_requests SET status = $1 WHERE id = $2 RETURNING *`,
+      [status, id]
+    );
+
+    await client.query("COMMIT");
+    return updateRes.rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 };
