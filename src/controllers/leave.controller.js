@@ -1,5 +1,4 @@
 import * as LeaveService from "../services/leave.service.js";
-import pool from "../config/db.js";
 
 // GET /api/leaves/types
 export const getLeaveTypes = async (req, res) => {
@@ -39,6 +38,7 @@ export const createLeaveRequest = async (req, res) => {
   }
 };
 
+// GET /api/leaves/all
 export const getAllLeaves = async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -52,6 +52,7 @@ export const getAllLeaves = async (req, res) => {
   }
 };
 
+// GET /api/leaves/balances
 export const getBalances = async (req, res) => {
   try {
     const balances = await LeaveService.getUserBalances(req.user.userId);
@@ -61,13 +62,18 @@ export const getBalances = async (req, res) => {
   }
 };
 
+// PUT /leave/:id/status (Approve/Reject)
 export const updateLeaveStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, rejectionReason } = req.body; // Added rejectionReason
 
     // Call the Service function
-    const updatedRequest = await LeaveService.updateLeaveStatus(id, status);
+    const updatedRequest = await LeaveService.updateLeaveStatus(
+      id,
+      status,
+      rejectionReason
+    );
 
     res.status(200).json({
       message: `Request ${status} successfully`,
@@ -83,7 +89,7 @@ export const updateLeaveStatus = async (req, res) => {
 export const deleteLeaveRequest = async (req, res) => {
   try {
     const { id } = req.params;
-    const roleId = req.user.role_id; // Retrieve Role from Token
+    const roleId = req.user.role_id;
 
     // 1. Fetch request to check status
     const leave = await LeaveService.getLeaveById(id);
@@ -106,24 +112,15 @@ export const deleteLeaveRequest = async (req, res) => {
   }
 };
 
-// PUT /leave/:id/update
+// PUT /leave/:id/update (Edit Details)
 export const updateLeaveRequest = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body; // "Approved" or "Rejected"
+    const data = req.body;
 
-    // OLD CODE (Delete this):
-    // const result = await pool.query(...)
-
-    // NEW CODE: Call the Service function that handles the deduction logic
-    const updatedRequest = await LeaveService.updateLeaveStatus(id, status);
-
-    res.status(200).json({
-      message: `Request ${status} successfully`,
-      data: updatedRequest,
-    });
+    const updated = await LeaveService.updateLeave(id, data);
+    res.status(200).json({ message: "Request updated", data: updated });
   } catch (error) {
-    console.error("Update Status Error:", error);
-    res.status(500).json({ message: error.message || "Internal server error" });
+    res.status(500).json({ message: error.message });
   }
 };

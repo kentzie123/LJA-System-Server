@@ -185,7 +185,8 @@ export const updateLeave = async (id, data) => {
   return result.rows[0];
 };
 
-export const updateLeaveStatus = async (id, status) => {
+// STATUS UPDATE (With Rejection Reason & Deduction Logic)
+export const updateLeaveStatus = async (id, status, rejectionReason = null) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -197,14 +198,17 @@ export const updateLeaveStatus = async (id, status) => {
     );
     const request = res.rows[0];
 
-    // Safety check
     if (!request) throw new Error("Request not found");
 
     const days = calculateDays(request.start_date, request.end_date);
-    const { user_id, leave_type_id, status: oldStatus } = request; // <--- This is vital
+    const { user_id, leave_type_id, status: oldStatus } = request;
     const leaveYear = new Date(request.start_date).getFullYear();
 
-    // We only deduct if it wasn't approved before.
+    // ---------------------------------------------------------
+    // LOGIC: Handle Balance Updates (Deduct / Refund)
+    // ---------------------------------------------------------
+
+    // A. Spending Credits (Pending -> Approved)
     if (status === "Approved" && oldStatus !== "Approved") {
       await client.query(
         `UPDATE employee_leave_balances 
@@ -214,6 +218,7 @@ export const updateLeaveStatus = async (id, status) => {
       );
     }
 
+    // B. Refunding Credits (Approved -> Rejected/Pending)
     if (oldStatus === "Approved" && status !== "Approved") {
       await client.query(
         `UPDATE employee_leave_balances 
@@ -222,12 +227,13 @@ export const updateLeaveStatus = async (id, status) => {
         [days, user_id, leave_type_id, leaveYear]
       );
     }
-    // ---------------------------------------------------------
 
-    // 2. Finally, update the status
+    // 2. Finally, update the status AND rejection reason
     const updateRes = await client.query(
-      `UPDATE leave_requests SET status = $1 WHERE id = $2 RETURNING *`,
-      [status, id]
+      `UPDATE leave_requests 
+       SET status = $1, rejection_reason = $3 
+       WHERE id = $2 RETURNING *`,
+      [status, id, rejectionReason]
     );
 
     await client.query("COMMIT");
