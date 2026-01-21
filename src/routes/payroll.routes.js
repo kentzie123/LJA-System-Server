@@ -1,20 +1,18 @@
-import express from "express";
+import { Router } from "express";
 import {
   createPayRun,
   getAllPayRuns,
-  getPayrollRecordsByRunId,
+  deletePayrun
 } from "../controllers/payroll.controller.js";
-import { verifyToken } from "../middleware/verifyToken.js";
 
-const router = express.Router();
+import { requireRole } from "../middleware/roleVerificationToken.js";
 
-// Get all Pay Run history (The folders)
-router.get("/", verifyToken, getAllPayRuns);
+const router = Router();
 
-// Get specific employee records inside a Pay Run
-router.get("/:id/records", verifyToken, getPayrollRecordsByRunId);
+router.get("/", requireRole(1, 3), getAllPayRuns);
 
-// Create a new Pay Run (The Calculation Engine)
-router.post("/create", verifyToken, createPayRun);
+router.post("/create", requireRole(1, 3), createPayRun);
+
+router.delete("/:id", requireRole(1,3), deletePayrun);
 
 export default router;

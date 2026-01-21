@@ -1,34 +1,19 @@
 import pool from "../config/db.js";
 
 const PayrollService = {
-  // --- 1. GET ALL PAY RUNS (For the History Table) ---
-  getAllPayRuns: async () => {
-    const result = await pool.query(
-      `SELECT * FROM pay_runs ORDER BY pay_date DESC`
-    );
-    return result.rows;
-  },
 
-  // --- 2. GET RECORDS INSIDE A PAY RUN (For the Payslip View) ---
-  getRecordsByRunId: async (payRunId) => {
-    const result = await pool.query(
-      `SELECT pr.*, u.fullname, u.position, u.branch, u.email 
-       FROM payroll_records pr
-       JOIN users u ON pr.user_id = u.id
-       WHERE pr.pay_run_id = $1`,
-      [payRunId]
-    );
-    return result.rows;
-  },
-
-  // --- 3. THE MAIN CALCULATION ENGINE ---
-  createPayRun: async ({ start_date, end_date, pay_date, run_name }) => {
-    const client = await pool.connect();
+  // ==========================================
+  // 1. CREATE PAY RUN (The Calculation Engine)
+  // ==========================================
+  // This replaces your simple insert with the full logic we planned:
+  // 1. Create Run -> 2. Get Users -> 3. Calculate Pay -> 4. Save Records
+  createPayRun: async ({ run_name, start_date, end_date, pay_date }) => {
+    const client = await pool.connect(); // Use a client for transactions
 
     try {
-      await client.query("BEGIN"); // Start Safety Transaction
+      await client.query("BEGIN"); // Start safe transaction
 
-      // A. Create the Pay Run Folder
+      // --- A. Create the Pay Run Entry (Your original logic) ---
       const runRes = await client.query(
         `INSERT INTO pay_runs (run_name, start_date, end_date, pay_date, status) 
          VALUES ($1, $2, $3, $4, 'Draft') RETURNING id`,
@@ -36,131 +21,51 @@ const PayrollService = {
       );
       const payRunId = runRes.rows[0].id;
 
-      // B. Get All Active Employees
+      // --- B. Get Active Employees ---
+      // We strictly need their ID and Daily Rate
       const usersRes = await client.query(
-        `SELECT id, payrate, fullname FROM users WHERE "isActive" = true`
+        `SELECT id, fullname, daily_rate FROM users WHERE "isActive" = true`
       );
-      const users = usersRes.rows;
 
-      // C. Loop through every employee
-      for (const user of users) {
-        // --- CALCULATION SETTINGS ---
-        // Assumption: 'payrate' in DB is the MONTHLY salary.
-        const monthlyRate = parseFloat(user.payrate || 0);
-        const semiMonthlyRate = monthlyRate / 2;
-        const dailyRate = monthlyRate / 22; // Approx 22 working days/month
-        const hourlyRate = dailyRate / 8;
+      // --- C. THE MAIN CALCULATION LOOP ---
+      for (const user of usersRes.rows) {
+        
+        // 1. Calculate Hourly Rate (Daily Rate / 8)
+        const hourlyRate = PayrollService.calculateHourlyRate(user.daily_rate);
 
-        // ---------------------------------------------------------
-        // 1. ATTENDANCE (Days Present)
-        // ---------------------------------------------------------
-        const attendanceRes = await client.query(
-          `SELECT COUNT(id) as days_present 
-           FROM attendance 
-           WHERE user_id = $1 
-             AND date BETWEEN $2 AND $3 
-             AND attendance_status = 'Present'`,
-          [user.id, start_date, end_date]
-        );
-        const daysPresent = parseInt(attendanceRes.rows[0].days_present || 0);
-
-        // LOGIC DECISION:
-        // Are they paid Fixed (Semi-Monthly) or per Day?
-        // Let's assume FIXED for now, but deduct absences if needed.
-        // For simple start: Gross = SemiMonthlyRate.
-        let basicPay = semiMonthlyRate;
-
-        // Optional: If you want "No Work No Pay", uncomment this:
-        // basicPay = daysPresent * dailyRate;
-
-        // ---------------------------------------------------------
-        // 2. OVERTIME CALCULATION
-        // ---------------------------------------------------------
-        const otRes = await client.query(
-          `SELECT otr.total_hours, ott.rate 
-           FROM overtime_requests otr
-           JOIN overtime_types ott ON otr.ot_type_id = ott.id
-           WHERE otr.user_id = $1 
-             AND otr.status = 'Approved'
-             AND otr.ot_date BETWEEN $2 AND $3`,
-          [user.id, start_date, end_date]
+        // 2. Get Verified Attendance Stats (Helper function below)
+        const attendance = await PayrollService.getAttendanceStats(
+          client, 
+          user.id, 
+          start_date, 
+          end_date
         );
 
-        let totalOvertimePay = 0;
+        // 3. Calculate Base Pay
+        // Formula: Total Verified Hours * Hourly Rate
+        const basicPay = attendance.total_worked_hours * hourlyRate;
 
-        otRes.rows.forEach((ot) => {
-          // Formula: HourlyRate * OT_Hours * OT_Rate (e.g. 1.25)
-          const pay =
-            hourlyRate * parseFloat(ot.total_hours) * parseFloat(ot.rate);
-          totalOvertimePay += pay;
-        });
+        // 4. Static Placeholders (For Overtime/Deductions later)
+        const totalOvertime = 0.00;
+        const totalDeductions = 0.00;
+        const totalAllowances = 0.00;
 
-        // ---------------------------------------------------------
-        // 3. ALLOWANCES (Placeholder)
-        // ---------------------------------------------------------
-        // If you add an 'allowances' table later, query it here.
-        let totalAllowances = 0;
+        // 5. Calculate Net Pay
+        const netPay = (basicPay + totalOvertime + totalAllowances) - totalDeductions;
 
-        // Gross Pay before Deductions
-        const grossPay = basicPay + totalOvertimePay + totalAllowances;
+        // 6. Create the "Receipt" (Details JSON)
+        // This is crucial for the Payslip UI
+        const detailsPayload = {
+          attendance_summary: {
+            days_present: attendance.days_present,
+            total_worked_hours: attendance.total_worked_hours,
+            total_late_hours: attendance.total_late_hours 
+          },
+          overtime_breakdown: [], 
+          deduction_breakdown: []
+        };
 
-        // ---------------------------------------------------------
-        // 4. DEDUCTIONS ENGINE (Loans, Tax, Etc.)
-        // ---------------------------------------------------------
-        let totalDeductions = 0;
-        const deductionDetails = {};
-
-        const plansRes = await client.query(
-          `SELECT * FROM deduction_plans 
-           WHERE user_id = $1 AND status = 'ACTIVE'`,
-          [user.id]
-        );
-
-        for (const plan of plansRes.rows) {
-          let amount = 0;
-
-          // A. Calculate Amount
-          if (plan.deduction_type === "FIXED") {
-            amount = parseFloat(plan.amount);
-          } else {
-            // Percentage of BASIC (not Gross)
-            amount = basicPay * (parseFloat(plan.amount) / 100);
-          }
-
-          // B. Check Loan Limits (If total_amount exists)
-          if (plan.total_amount !== null) {
-            const paid = parseFloat(plan.paid_amount || 0);
-            const total = parseFloat(plan.total_amount);
-            const balance = total - paid;
-
-            if (balance < amount) amount = balance; // Don't over-deduct
-            if (balance <= 0) amount = 0; // Already paid
-
-            // UPDATE PLAN BALANCE
-            if (amount > 0) {
-              const newPaid = paid + amount;
-              const newStatus = newPaid >= total ? "COMPLETED" : "ACTIVE";
-
-              await client.query(
-                `UPDATE deduction_plans 
-                 SET paid_amount = $1, status = $2 
-                 WHERE id = $3`,
-                [newPaid, newStatus, plan.id]
-              );
-            }
-          }
-
-          if (amount > 0) {
-            totalDeductions += amount;
-            deductionDetails[plan.name] = amount;
-          }
-        }
-
-        // ---------------------------------------------------------
-        // 5. FINAL NET PAY & SAVE
-        // ---------------------------------------------------------
-        const netPay = grossPay - totalDeductions;
-
+        // 7. Save the Payroll Record
         await client.query(
           `INSERT INTO payroll_records 
            (pay_run_id, user_id, basic_salary, overtime_pay, allowances, deductions, net_pay, details, status)
@@ -168,26 +73,98 @@ const PayrollService = {
           [
             payRunId,
             user.id,
-            basicPay,
-            totalOvertimePay,
-            totalAllowances,
-            totalDeductions,
-            netPay,
-            JSON.stringify(deductionDetails),
+            basicPay,        
+            totalOvertime,   
+            totalAllowances, 
+            totalDeductions, 
+            netPay,          
+            JSON.stringify(detailsPayload)
           ]
         );
       }
 
-      await client.query("COMMIT");
-      return payRunId;
+      await client.query("COMMIT"); // Save everything
+      return { success: true, id: payRunId };
+
     } catch (error) {
-      await client.query("ROLLBACK");
-      console.error("Payroll Calc Error:", error);
+      await client.query("ROLLBACK"); // Undo if anything fails
+      console.error("Payroll Calculation Error:", error);
       throw error;
     } finally {
       client.release();
     }
   },
+
+
+  
+  // ==========================================
+  // 2. HELPER FUNCTIONS (The Workers)
+  // ==========================================
+
+  calculateHourlyRate: (dailyRateStr) => {
+    const dailyRate = parseFloat(dailyRateStr || 0);
+    if (dailyRate === 0) return 0;
+    return dailyRate / 8;
+  },
+
+  getAttendanceStats: async (client, userId, startDate, endDate) => {
+    const query = `
+      SELECT 
+        COALESCE(SUM(worked_hours), 0) as total_worked_hours,
+        COUNT(id) as days_present,
+        COALESCE(SUM(
+          CASE 
+            WHEN time_in > '08:15:00'::time THEN 
+              EXTRACT(EPOCH FROM (time_in - '08:15:00'::time)) / 3600
+            ELSE 0 
+          END
+        ), 0) as total_late_hours
+      FROM attendance
+      WHERE user_id = $1
+        AND date BETWEEN $2 AND $3
+        AND status_in = 'Verified'   -- MUST BE VERIFIED
+        AND status_out = 'Verified'  -- MUST BE VERIFIED
+    `;
+
+    const result = await client.query(query, [userId, startDate, endDate]);
+    const row = result.rows[0];
+
+    return {
+      total_worked_hours: parseFloat(row.total_worked_hours),
+      days_present: parseInt(row.days_present),
+      total_late_hours: parseFloat(parseFloat(row.total_late_hours).toFixed(2))
+    };
+  },
+
+
+
+
+  // ==========================================
+  // 3. READ & DELETE (Existing Operations)
+  // ==========================================
+
+  getAllPayRuns: async () => {
+    // I added a small upgrade here: It counts employees & total cost for the UI list
+    const result = await pool.query(`
+      SELECT pr.*, 
+      (SELECT COUNT(*) FROM payroll_records WHERE pay_run_id = pr.id) as employee_count,
+      (SELECT COALESCE(SUM(net_pay), 0) FROM payroll_records WHERE pay_run_id = pr.id) as total_cost
+      FROM pay_runs pr 
+      ORDER BY pay_date DESC
+    `);
+    return result.rows;
+  },
+
+  deletePayRun: async (id) => {
+    const query = "DELETE FROM pay_runs WHERE id = $1 RETURNING id";
+    const result = await pool.query(query, [id]);
+
+    if (result.rowCount === 0) {
+      throw new Error("Pay Run not found");
+    }
+
+    return result.rows[0];
+  }
 };
 
 export default PayrollService;

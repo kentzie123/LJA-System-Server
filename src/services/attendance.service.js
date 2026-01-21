@@ -1,9 +1,44 @@
 import pool from "../config/db.js";
 
+// ==========================================
+// HELPER: THE PAYROLL MATH (Only affects worked_hours)
+// ==========================================
+// 1. START TIME: Caps calculation at 8:15 AM (ignores time before).
+// 2. END TIME:   Caps calculation at 5:00 PM (17:00:00).
+// 3. LUNCH:      Subtracts any overlap with 12:00 PM - 1:00 PM.
+//
+// NOTE: This math DOES NOT change the 'time_in' or 'time_out' columns.
+//       It only calculates the 'worked_hours' number.
+const WORKED_HOURS_SQL = `
+  ROUND(CAST(
+    GREATEST(0, 
+      (
+        -- A. Raw Duration (Effective End - Effective Start)
+        EXTRACT(EPOCH FROM (
+          LEAST($4::TIME, '17:00:00'::TIME) -         -- End Cap: 5:00 PM
+          GREATEST($3::TIME, '08:15:00'::TIME)        -- Start Cap: 8:15 AM
+        )) / 3600
+      ) 
+      - 
+      (
+        -- B. Lunch Deduction (Overlap with 12:00-13:00)
+        GREATEST(0, 
+          EXTRACT(EPOCH FROM (
+            LEAST(LEAST($4::TIME, '17:00:00'::TIME), '13:00:00'::TIME) - 
+            GREATEST(GREATEST($3::TIME, '08:15:00'::TIME), '12:00:00'::TIME)
+          )) / 3600
+        )
+      )
+    )
+  AS NUMERIC), 2)
+`;
+
+// ==========================================
+// 1. MANUAL ENTRY
+// ==========================================
 export const createManualEntry = async (entryData) => {
   const { userId, date, timeIn, timeOut, photoIn, photoOut } = entryData;
 
-  // 1. Check if a record already exists for this date
   const check = await pool.query(
     "SELECT * FROM attendance WHERE user_id = $1 AND date = $2",
     [userId, date]
@@ -13,44 +48,36 @@ export const createManualEntry = async (entryData) => {
     throw new Error(`Attendance record already exists for user on ${date}`);
   }
 
-  // 2. Insert and Calculate Hours
-  // We explicitly cast the inputs ($3 and $4) to TIME to perform the math
   const query = `
     INSERT INTO attendance (
-      user_id, 
-      date, 
-      time_in, 
-      time_out, 
-      photo_in, 
-      photo_out, 
-      worked_hours
+      user_id, date, time_in, time_out, photo_in, photo_out, worked_hours
     ) 
     VALUES (
-      $1, $2, $3, $4, $5, $6,
-      ROUND(CAST(EXTRACT(EPOCH FROM ($4::TIME - $3::TIME)) / 3600 AS NUMERIC), 2)
+      $1, $2, 
+      $3, -- SAVES EXACT TIME IN (e.g., 7:00 AM)
+      $4, -- SAVES EXACT TIME OUT (e.g., 5:00 PM)
+      $5, $6,
+      ${WORKED_HOURS_SQL} -- MATH uses 8:15 AM
     ) 
     RETURNING *
   `;
 
   const result = await pool.query(query, [
-    userId,
-    date,
-    timeIn,
-    timeOut,
-    photoIn || null, // Handle optional photos
-    photoOut || null,
+    userId, date, timeIn, timeOut, photoIn || null, photoOut || null,
   ]);
 
   return result.rows[0];
 };
 
+// ==========================================
+// 2. GET ALL ATTENDANCE
+// ==========================================
 export const getAllAttendance = async () => {
   const query = `
     SELECT 
       a.*, 
       u.fullname,
       u.email,
-      -- Extract initials from fullname (e.g., "Alice Freeman" -> "AF")
       (SELECT string_agg(substring(n from 1 for 1), '') 
        FROM regexp_split_to_table(u.fullname, '\s+') as n) as initials
     FROM attendance a
@@ -62,6 +89,9 @@ export const getAllAttendance = async () => {
   return result.rows;
 };
 
+// ==========================================
+// 3. DELETE ATTENDANCE
+// ==========================================
 export const deleteAttendance = async (id) => {
   const result = await pool.query(
     "DELETE FROM attendance WHERE id = $1 RETURNING *",
@@ -75,34 +105,35 @@ export const deleteAttendance = async (id) => {
   return result.rows[0];
 };
 
+// ==========================================
+// 4. UPDATE ATTENDANCE
+// ==========================================
 export const updateAttendance = async (id, data) => {
-  const { date, timeIn, timeOut } = data; // Removed status
-
-  // Convert empty strings to null so PostgreSQL handles them correctly
+  const { date, timeIn, timeOut } = data;
   const formattedTimeIn = timeIn || null;
   const formattedTimeOut = timeOut || null;
+
+  // Swap Params for Update: $2 is Time In, $3 is Time Out
+  const dynamicSQL = WORKED_HOURS_SQL
+    .replace(/\$3/g, "$2") 
+    .replace(/\$4/g, "$3");
 
   const query = `
     UPDATE attendance
     SET 
       date = $1,
-      time_in = $2,
+      time_in = $2, -- SAVES EXACT INPUT
       time_out = $3,
       worked_hours = CASE 
         WHEN $2::TIME IS NOT NULL AND $3::TIME IS NOT NULL 
-        THEN ROUND(CAST(EXTRACT(EPOCH FROM ($3::TIME - $2::TIME)) / 3600 AS NUMERIC), 2)
+        THEN ${dynamicSQL}
         ELSE 0 
       END
     WHERE id = $4
     RETURNING *
   `;
 
-  const result = await pool.query(query, [
-    date,
-    formattedTimeIn,
-    formattedTimeOut,
-    id,
-  ]);
+  const result = await pool.query(query, [date, formattedTimeIn, formattedTimeOut, id]);
 
   if (result.rows.length === 0) {
     throw new Error("Attendance record not found.");
@@ -111,6 +142,9 @@ export const updateAttendance = async (id, data) => {
   return result.rows[0];
 };
 
+// ==========================================
+// 5. GET TODAY STATUS
+// ==========================================
 export const getTodayStatus = async (userId) => {
   const result = await pool.query(
     "SELECT * FROM attendance WHERE user_id = $1 AND date = CURRENT_DATE",
@@ -119,11 +153,13 @@ export const getTodayStatus = async (userId) => {
 
   if (result.rows.length === 0) return { status: "idle" };
   const record = result.rows[0];
-  if (record.time_in && !record.time_out)
-    return { status: "clocked_in", record };
+  if (record.time_in && !record.time_out) return { status: "clocked_in", record };
   return { status: "completed", record };
 };
 
+// ==========================================
+// 6. CLOCK IN (LIVE)
+// ==========================================
 export const clockIn = async (userId, photoInBase64, locationData) => {
   const check = await pool.query(
     "SELECT * FROM attendance WHERE user_id = $1 AND date = CURRENT_DATE",
@@ -134,26 +170,28 @@ export const clockIn = async (userId, photoInBase64, locationData) => {
     throw new Error("You have already clocked in for today.");
   }
 
-  // Insert Photo, Location, and set Status to Pending
+  // We use "AT TIME ZONE 'Asia/Manila'" to fix the "8am recorded when 7am" bug
+  // This forces the server to use Philippine time.
   const query = `
     INSERT INTO attendance (
-      user_id, 
-      time_in, 
-      date, 
-      photo_in, 
-      location_in, 
-      status_in,      -- New
-      attendance_status -- New
+      user_id, time_in, date, photo_in, location_in, status_in, attendance_status
     ) 
-    VALUES ($1, CURRENT_TIME, CURRENT_DATE, $2, $3, 'Pending', 'Present') 
+    VALUES (
+      $1, 
+      CURRENT_TIME AT TIME ZONE 'Asia/Manila', -- Force PH Time
+      CURRENT_DATE AT TIME ZONE 'Asia/Manila', 
+      $2, $3, 'Pending', 'Present'
+    ) 
     RETURNING *
   `;
 
-  // locationData is expected to be { lat: 123, lng: 456, accuracy: 10 }
   const result = await pool.query(query, [userId, photoInBase64, locationData]);
   return result.rows[0];
 };
 
+// ==========================================
+// 7. CLOCK OUT (LIVE)
+// ==========================================
 export const clockOut = async (userId, photoOutBase64, locationData) => {
   const check = await pool.query(
     "SELECT * FROM attendance WHERE user_id = $1 AND date = CURRENT_DATE AND time_out IS NULL",
@@ -164,37 +202,38 @@ export const clockOut = async (userId, photoOutBase64, locationData) => {
     throw new Error("No active Clock In record found for today.");
   }
 
-  // Update Photo, Location, and set Out Status to Pending
+  // Replace params with DB columns and PH system time
+  const dynamicSQL = WORKED_HOURS_SQL
+    .replace(/\$3::TIME/g, "time_in")
+    .replace(/\$4::TIME/g, "(CURRENT_TIME AT TIME ZONE 'Asia/Manila')");
+
   const query = `
     UPDATE attendance
     SET 
-      time_out = CURRENT_TIME,
+      time_out = CURRENT_TIME AT TIME ZONE 'Asia/Manila', -- Force PH Time
       photo_out = $1,
-      location_out = $2, -- New
-      status_out = 'Pending', -- New
-      worked_hours = ROUND(CAST(EXTRACT(EPOCH FROM (CURRENT_TIME - time_in)) / 3600 AS NUMERIC), 2),
+      location_out = $2,
+      status_out = 'Pending',
+      worked_hours = ${dynamicSQL},
       updated_at = CURRENT_TIMESTAMP
     WHERE user_id = $3 AND date = CURRENT_DATE AND time_out IS NULL
     RETURNING *
   `;
 
-  const result = await pool.query(query, [
-    photoOutBase64,
-    locationData,
-    userId,
-  ]);
+  const result = await pool.query(query, [photoOutBase64, locationData, userId]);
   return result.rows[0];
 };
 
+// ==========================================
+// 8. VERIFY ATTENDANCE
+// ==========================================
 export const verifyAttendance = async (id, adminId, verificationData) => {
   const { type, status, notes } = verificationData;
 
-  // Security Check: Ensure type is strictly 'in' or 'out'
   if (type !== "in" && type !== "out") {
     throw new Error("Invalid verification type. Must be 'in' or 'out'.");
   }
 
-  // Determine which columns to update based on type
   const statusColumn = type === "in" ? "status_in" : "status_out";
   const verifierColumn = type === "in" ? "verified_by_in" : "verified_by_out";
   const notesColumn = type === "in" ? "notes_in" : "notes_out";
@@ -210,16 +249,11 @@ export const verifyAttendance = async (id, adminId, verificationData) => {
     RETURNING *
   `;
 
-  const result = await pool.query(query, [
-    status, // $1: 'Verified' or 'Rejected'
-    adminId, // $2: The Admin ID (from token)
-    notes, // $3: Optional notes
-    id, // $4: Record ID
-  ]);
+  const result = await pool.query(query, [status, adminId, notes, id]);
 
   if (result.rows.length === 0) {
     throw new Error("Attendance record not found.");
   }
 
   return result.rows[0];
-};
+};  

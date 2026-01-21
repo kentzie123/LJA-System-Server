@@ -14,6 +14,7 @@ import attendanceRoutes from "./routes/attendance.routes.js";
 import leaveRoutes from "./routes/leave.routes.js";
 import overtimeRoutes from "./routes/overtime.routes.js";
 import payrollRoutes from "./routes/payroll.routes.js";
+// import deductionRoutes from "./routes/deduction.routes.js";
 
 const allowedOrigins = ["http://localhost:3000"];
 
@@ -50,6 +51,7 @@ app.use("/api/attendances", attendanceRoutes);
 app.use("/api/leave", leaveRoutes);
 app.use("/api/overtime", overtimeRoutes);
 app.use("/api/payroll", payrollRoutes);
+// app.use("/api/deductions", deductionRoutes);
 
 app.get("/api/status", (req, res) => {
   res.json({
