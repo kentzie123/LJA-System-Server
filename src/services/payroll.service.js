@@ -1,102 +1,110 @@
 import pool from "../config/db.js";
 
 const PayrollService = {
-
-  // ==========================================
+ // ==========================================
   // 1. CREATE PAY RUN (The Calculation Engine)
   // ==========================================
-  // This replaces your simple insert with the full logic we planned:
-  // 1. Create Run -> 2. Get Users -> 3. Calculate Pay -> 4. Save Records
   createPayRun: async ({ run_name, start_date, end_date, pay_date }) => {
-    const client = await pool.connect(); // Use a client for transactions
+    const client = await pool.connect();
 
     try {
-      await client.query("BEGIN"); // Start safe transaction
+      await client.query("BEGIN");
 
-      // --- A. Create the Pay Run Entry (Your original logic) ---
+      // A. Create Pay Run Record
       const runRes = await client.query(
         `INSERT INTO pay_runs (run_name, start_date, end_date, pay_date, status) 
          VALUES ($1, $2, $3, $4, 'Draft') RETURNING id`,
-        [run_name, start_date, end_date, pay_date]
+        [run_name, start_date, end_date, pay_date],
       );
       const payRunId = runRes.rows[0].id;
 
-      // --- B. Get Active Employees ---
-      // We strictly need their ID and Daily Rate
+      // B. Get All Active Employees
       const usersRes = await client.query(
-        `SELECT id, fullname, daily_rate FROM users WHERE "isActive" = true`
+        `SELECT id, fullname, daily_rate FROM users WHERE "isActive" = true`,
       );
 
-      // --- C. THE MAIN CALCULATION LOOP ---
+      // C. THE MAIN CALCULATION LOOP
       for (const user of usersRes.rows) {
         
-        // 1. Calculate Hourly Rate (Daily Rate / 8)
+        // 1. Calculate Hourly Rate (Daily / 8)
         const hourlyRate = PayrollService.calculateHourlyRate(user.daily_rate);
 
-        // 2. Get Verified Attendance Stats (Helper function below)
+        // 2. Calculate Base Pay (Verified Attendance)
         const attendance = await PayrollService.getAttendanceStats(
-          client, 
-          user.id, 
-          start_date, 
-          end_date
+          client,
+          user.id,
+          start_date,
+          end_date,
         );
-
-        // 3. Calculate Base Pay
-        // Formula: Total Verified Hours * Hourly Rate
         const basicPay = attendance.total_worked_hours * hourlyRate;
 
-        // 4. Static Placeholders (For Overtime/Deductions later)
-        const totalOvertime = 0.00;
-        const totalDeductions = 0.00;
-        const totalAllowances = 0.00;
+        // 3. Calculate Overtime (Approved Requests)
+        const overtimeData = await PayrollService.calculateOvertime(
+          client,
+          user.id,
+          start_date,
+          end_date,
+          hourlyRate,
+        );
+        const totalOvertime = overtimeData.total_amount;
+
+        // ---------------------------------------------------------
+        // 4. CALCULATE DEDUCTIONS (CONNECTING THE WORKER HERE!)
+        // ---------------------------------------------------------
+        const deductionData = await PayrollService.calculateDeductions(
+          client,
+          user.id,
+          basicPay // We pass basicPay because some deductions are % based
+        );
+        
+        const totalDeductions = deductionData.total_amount;
+        const totalAllowances = 0.0; // Placeholder for future feature
 
         // 5. Calculate Net Pay
-        const netPay = (basicPay + totalOvertime + totalAllowances) - totalDeductions;
+        // Logic: Basic + OT + Allowances - Deductions
+        const netPay = basicPay + totalOvertime + totalAllowances - totalDeductions;
 
-        // 6. Create the "Receipt" (Details JSON)
-        // This is crucial for the Payslip UI
+        // 6. Build the JSON Receipt (Details for Payslip)
         const detailsPayload = {
           attendance_summary: {
             days_present: attendance.days_present,
             total_worked_hours: attendance.total_worked_hours,
-            total_late_hours: attendance.total_late_hours 
+            total_late_hours: attendance.total_late_hours,
           },
-          overtime_breakdown: [], 
-          deduction_breakdown: []
+          overtime_breakdown: overtimeData.breakdown,
+          // SAVE THE BREAKDOWN HERE so the Payslip can see it
+          deduction_breakdown: deductionData.breakdown, 
         };
 
         // 7. Save the Payroll Record
         await client.query(
           `INSERT INTO payroll_records 
-           (pay_run_id, user_id, basic_salary, overtime_pay, allowances, deductions, net_pay, details, status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending')`,
+            (pay_run_id, user_id, basic_salary, overtime_pay, allowances, deductions, net_pay, details, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Pending')`,
           [
             payRunId,
             user.id,
-            basicPay,        
-            totalOvertime,   
-            totalAllowances, 
-            totalDeductions, 
-            netPay,          
-            JSON.stringify(detailsPayload)
-          ]
+            basicPay,
+            totalOvertime,
+            totalAllowances,
+            totalDeductions, // Save the total amount
+            netPay,
+            JSON.stringify(detailsPayload), // Save the list of specific deductions
+          ],
         );
       }
 
-      await client.query("COMMIT"); // Save everything
+      await client.query("COMMIT");
       return { success: true, id: payRunId };
-
     } catch (error) {
-      await client.query("ROLLBACK"); // Undo if anything fails
-      console.error("Payroll Calculation Error:", error);
+      await client.query("ROLLBACK");
+      console.error("Payroll Error:", error);
       throw error;
     } finally {
       client.release();
     }
   },
 
-
-  
   // ==========================================
   // 2. HELPER FUNCTIONS (The Workers)
   // ==========================================
@@ -107,6 +115,7 @@ const PayrollService = {
     return dailyRate / 8;
   },
 
+  // --- WORKER: Attendance Stats ---
   getAttendanceStats: async (client, userId, startDate, endDate) => {
     const query = `
       SELECT 
@@ -122,8 +131,8 @@ const PayrollService = {
       FROM attendance
       WHERE user_id = $1
         AND date BETWEEN $2 AND $3
-        AND status_in = 'Verified'   -- MUST BE VERIFIED
-        AND status_out = 'Verified'  -- MUST BE VERIFIED
+        AND status_in = 'Verified'
+        AND status_out = 'Verified'
     `;
 
     const result = await client.query(query, [userId, startDate, endDate]);
@@ -132,19 +141,92 @@ const PayrollService = {
     return {
       total_worked_hours: parseFloat(row.total_worked_hours),
       days_present: parseInt(row.days_present),
-      total_late_hours: parseFloat(parseFloat(row.total_late_hours).toFixed(2))
+      total_late_hours: parseFloat(parseFloat(row.total_late_hours).toFixed(2)),
     };
   },
 
+  // --- WORKER: Overtime Calculation ---
+  calculateOvertime: async (client, userId, startDate, endDate, hourlyRate) => {
+    const query = `
+      SELECT 
+        ot.ot_date,
+        ot.total_hours,
+        ott.name as type_name,
+        ott.rate as multiplier
+      FROM overtime_requests ot
+      JOIN overtime_types ott ON ot.ot_type_id = ott.id
+      WHERE ot.user_id = $1
+        AND ot.ot_date BETWEEN $2 AND $3
+        AND ot.status = 'Approved'
+    `;
 
+    const result = await client.query(query, [userId, startDate, endDate]);
 
+    let totalAmount = 0;
+    const breakdown = [];
+
+    for (const record of result.rows) {
+      const hours = parseFloat(record.total_hours);
+      const multiplier = parseFloat(record.multiplier);
+
+      const cost = hourlyRate * multiplier * hours;
+      totalAmount += cost;
+
+      breakdown.push({
+        date: record.ot_date,
+        type: record.type_name,
+        hours: hours,
+        amount: parseFloat(cost.toFixed(2)),
+      });
+    }
+
+    return {
+      total_amount: totalAmount,
+      breakdown: breakdown,
+    };
+  },
 
   // ==========================================
-  // 3. READ & DELETE (Existing Operations)
+  // 3. READ & DELETE OPERATIONS
   // ==========================================
 
+  // For the "Run Details" Page (3 Cards + Table)
+  getPayRunDetails: async (id) => {
+    const runQuery = `SELECT * FROM pay_runs WHERE id = $1`;
+
+    const recordsQuery = `
+      SELECT pr.*, u.fullname, u.position, u.email
+      FROM payroll_records pr
+      JOIN users u ON pr.user_id = u.id
+      WHERE pr.pay_run_id = $1
+      ORDER BY u.fullname ASC
+    `;
+
+    const totalsQuery = `
+      SELECT 
+        COALESCE(SUM(overtime_pay), 0) as total_overtime,
+        COALESCE(SUM(deductions), 0) as total_deductions,
+        COALESCE(SUM(net_pay), 0) as total_net_pay
+      FROM payroll_records WHERE pay_run_id = $1
+    `;
+
+    const [runRes, recordsRes, totalsRes] = await Promise.all([
+      pool.query(runQuery, [id]),
+      pool.query(recordsQuery, [id]),
+      pool.query(totalsQuery, [id]),
+    ]);
+
+    if (runRes.rows.length === 0) throw new Error("Pay Run not found");
+
+    return {
+      meta: runRes.rows[0],
+      records: recordsRes.rows,
+      totals: totalsRes.rows[0],
+    };
+  },
+
+  // For the "Payroll History" Page (Admin)
   getAllPayRuns: async () => {
-    // I added a small upgrade here: It counts employees & total cost for the UI list
     const result = await pool.query(`
       SELECT pr.*, 
       (SELECT COUNT(*) FROM payroll_records WHERE pay_run_id = pr.id) as employee_count,
@@ -152,6 +234,45 @@ const PayrollService = {
       FROM pay_runs pr 
       ORDER BY pay_date DESC
     `);
+    return result.rows;
+  },
+
+  // For the "Global Payroll Records" (Admin Report)
+  getAllPayrollRecords: async () => {
+    const query = `
+      SELECT 
+        pr.*,
+        u.fullname,
+        u.email,
+        u.position,
+        r.run_name,
+        r.start_date as period_start,
+        r.end_date as period_end,
+        r.pay_date
+      FROM payroll_records pr
+      JOIN users u ON pr.user_id = u.id
+      JOIN pay_runs r ON pr.pay_run_id = r.id
+      ORDER BY r.pay_date DESC, u.fullname ASC
+    `;
+    const result = await pool.query(query);
+    return result.rows;
+  },
+
+  // For the "My Payslips" Page (Employee)
+  getUserPayrollRecords: async (userId) => {
+    const query = `
+      SELECT 
+        pr.*,
+        r.run_name,
+        r.start_date as period_start,
+        r.end_date as period_end,
+        r.pay_date
+      FROM payroll_records pr
+      JOIN pay_runs r ON pr.pay_run_id = r.id
+      WHERE pr.user_id = $1
+      ORDER BY r.pay_date DESC
+    `;
+    const result = await pool.query(query, [userId]);
     return result.rows;
   },
 
@@ -164,6 +285,133 @@ const PayrollService = {
     }
 
     return result.rows[0];
+  },
+
+
+
+
+  
+  // --- WORKER 3: NEW CALCULATION LOGIC ---
+  calculateDeductions: async (client, userId, basicPay) => {
+    let totalDeduction = 0;
+    const breakdown = [];
+
+    // QUERY: Fetch Plans relevant to this User
+    // Condition A: Plan is GLOBAL
+    // Condition B: Plan is linked to this User in SUBSCRIBERS table
+    const query = `
+      SELECT 
+        dp.id as plan_id, 
+        dp.name, 
+        dp.deduction_type, 
+        dp.amount as plan_amount,
+        dp.is_global,
+        ds.total_loan_amount, 
+        ds.paid_loan_amount
+      FROM deduction_plans dp
+      LEFT JOIN deduction_subscribers ds ON dp.id = ds.deduction_plan_id AND ds.user_id = $1
+      WHERE dp.status = 'ACTIVE'
+        AND (dp.is_global = true OR ds.user_id IS NOT NULL)
+    `;
+
+    const result = await client.query(query, [userId]);
+
+    for (const plan of result.rows) {
+      let deductionAmount = 0;
+      const planValue = parseFloat(plan.plan_amount);
+
+      // 1. Calculate Amount (Fixed vs Percentage)
+      if (plan.deduction_type === 'PERCENTAGE') {
+        deductionAmount = basicPay * (planValue / 100);
+      } else {
+        deductionAmount = planValue;
+      }
+
+      // 2. Loan Logic (Only if the User has a specific loan balance in subscribers table)
+      const totalLoan = parseFloat(plan.total_loan_amount || 0);
+      
+      if (totalLoan > 0) {
+        const paidSoFar = parseFloat(plan.paid_loan_amount || 0);
+        const remainingBalance = totalLoan - paidSoFar;
+
+        if (remainingBalance < deductionAmount) {
+          deductionAmount = remainingBalance;
+        }
+        if (remainingBalance <= 0) deductionAmount = 0;
+      }
+
+      // 3. Add to Total
+      if (deductionAmount > 0) {
+        deductionAmount = parseFloat(deductionAmount.toFixed(2));
+        totalDeduction += deductionAmount;
+
+        breakdown.push({
+          plan_id: plan.plan_id,
+          name: plan.name,
+          amount: deductionAmount,
+          is_global: plan.is_global
+        });
+      }
+    }
+
+    return {
+      total_amount: totalDeduction,
+      breakdown: breakdown
+    };
+  },
+
+  // ==========================================
+  // 4. FINALIZE PAY RUN (Commit Deductions)
+  // ==========================================
+  finalizePayRun: async (payRunId) => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // 1. Get all payroll records for this run
+      const recordsQuery = `
+        SELECT user_id, details 
+        FROM payroll_records 
+        WHERE pay_run_id = $1
+      `;
+      const recordsRes = await client.query(recordsQuery, [payRunId]);
+
+      for (const record of recordsRes.rows) {
+        const userId = record.user_id;
+        const details = record.details; 
+        const deductions = details.deduction_breakdown || [];
+
+        for (const item of deductions) {
+          // item.plan_id comes from our calculateDeductions breakdown
+          if (item.plan_id) {
+            
+            // INSERT INTO LEDGER
+            // We now include 'user_id' so the trigger knows whose balance to update
+            await client.query(
+              `INSERT INTO deduction_ledger 
+               (pay_run_id, deduction_plan_id, user_id, amount_paid)
+               VALUES ($1, $2, $3, $4)`,
+              [payRunId, item.plan_id, userId, item.amount]
+            );
+          }
+        }
+      }
+
+      // 2. Mark Pay Run as 'Completed'
+      await client.query(
+        "UPDATE pay_runs SET status = 'Completed' WHERE id = $1", 
+        [payRunId]
+      );
+
+      await client.query("COMMIT");
+      return { success: true, message: "Pay run finalized and balances updated." };
+
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 };
 
