@@ -14,10 +14,10 @@ export const generateToken = (user, res) => {
   res.cookie("lja_hris_token", token, {
     httpOnly: true, // Prevents JavaScript from reading the cookie (Security)
 
-    secure: process.env.NODE_ENV !== "development",
+    secure: false,
 
     // 'strict' is best for same-domain, 'lax' is okay for dev
-    sameSite: process.env.NODE_ENV === "development" ? "lax" : "strict",
+    sameSite: "lax",
 
     maxAge: 24 * 60 * 60 * 1000, 
   });
