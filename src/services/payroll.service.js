@@ -1,7 +1,7 @@
 import pool from "../config/db.js";
 
 const PayrollService = {
- // ==========================================
+  // ==========================================
   // 1. CREATE PAY RUN (The Calculation Engine)
   // ==========================================
   createPayRun: async ({ run_name, start_date, end_date, pay_date }) => {
@@ -14,13 +14,13 @@ const PayrollService = {
       const runRes = await client.query(
         `INSERT INTO pay_runs (run_name, start_date, end_date, pay_date, status) 
          VALUES ($1, $2, $3, $4, 'Draft') RETURNING id`,
-        [run_name, start_date, end_date, pay_date],
+        [run_name, start_date, end_date, pay_date]
       );
       const payRunId = runRes.rows[0].id;
 
       // B. Get All Active Employees
       const usersRes = await client.query(
-        `SELECT id, fullname, daily_rate FROM users WHERE "isActive" = true`,
+        `SELECT id, fullname, daily_rate FROM users WHERE "isActive" = true`
       );
 
       // C. THE MAIN CALCULATION LOOP
@@ -29,54 +29,64 @@ const PayrollService = {
         // 1. Calculate Hourly Rate (Daily / 8)
         const hourlyRate = PayrollService.calculateHourlyRate(user.daily_rate);
 
-        // 2. Calculate Base Pay (Verified Attendance)
+        // 2. Calculate Attendance (Worked Hours)
         const attendance = await PayrollService.getAttendanceStats(
           client,
           user.id,
           start_date,
-          end_date,
+          end_date
         );
-        const basicPay = attendance.total_worked_hours * hourlyRate;
 
-        // 3. Calculate Overtime (Approved Requests)
+        // 3. [FIXED] Calculate Paid Leave
+        const leaveStats = await PayrollService.getPaidLeaveStats(
+          client,
+          user.id,
+          start_date,
+          end_date
+        );
+
+        // 4. Calculate Basic Pay (Worked Hours + Paid Leave Hours)
+        // We add the leave hours to the worked hours before multiplying
+        const totalPaidHours = attendance.total_worked_hours + leaveStats.hours;
+        const basicPay = totalPaidHours * hourlyRate;
+
+        // 5. Calculate Overtime (Approved Requests)
         const overtimeData = await PayrollService.calculateOvertime(
           client,
           user.id,
           start_date,
           end_date,
-          hourlyRate,
+          hourlyRate
         );
         const totalOvertime = overtimeData.total_amount;
 
-        // ---------------------------------------------------------
-        // 4. CALCULATE DEDUCTIONS (CONNECTING THE WORKER HERE!)
-        // ---------------------------------------------------------
+        // 6. CALCULATE DEDUCTIONS
         const deductionData = await PayrollService.calculateDeductions(
           client,
           user.id,
-          basicPay // We pass basicPay because some deductions are % based
+          basicPay 
         );
         
         const totalDeductions = deductionData.total_amount;
-        const totalAllowances = 0.0; // Placeholder for future feature
+        const totalAllowances = 0.0; 
 
-        // 5. Calculate Net Pay
-        // Logic: Basic + OT + Allowances - Deductions
+        // 7. Calculate Net Pay
         const netPay = basicPay + totalOvertime + totalAllowances - totalDeductions;
 
-        // 6. Build the JSON Receipt (Details for Payslip)
+        // 8. Build the JSON Receipt (Details for Payslip)
         const detailsPayload = {
           attendance_summary: {
             days_present: attendance.days_present,
             total_worked_hours: attendance.total_worked_hours,
             total_late_hours: attendance.total_late_hours,
+            paid_leave_days: leaveStats.days,
+            paid_leave_hours: leaveStats.hours,
           },
           overtime_breakdown: overtimeData.breakdown,
-          // SAVE THE BREAKDOWN HERE so the Payslip can see it
           deduction_breakdown: deductionData.breakdown, 
         };
 
-        // 7. Save the Payroll Record
+        // 9. Save the Payroll Record
         await client.query(
           `INSERT INTO payroll_records 
             (pay_run_id, user_id, basic_salary, overtime_pay, allowances, deductions, net_pay, details, status)
@@ -87,10 +97,10 @@ const PayrollService = {
             basicPay,
             totalOvertime,
             totalAllowances,
-            totalDeductions, // Save the total amount
+            totalDeductions, 
             netPay,
-            JSON.stringify(detailsPayload), // Save the list of specific deductions
-          ],
+            JSON.stringify(detailsPayload), 
+          ]
         );
       }
 
@@ -106,7 +116,7 @@ const PayrollService = {
   },
 
   // ==========================================
-  // 2. HELPER FUNCTIONS (The Workers)
+  // 2. HELPER FUNCTIONS
   // ==========================================
 
   calculateHourlyRate: (dailyRateStr) => {
@@ -115,7 +125,7 @@ const PayrollService = {
     return dailyRate / 8;
   },
 
-  // --- WORKER: Attendance Stats ---
+  // --- WORKER 1: Attendance Stats ---
   getAttendanceStats: async (client, userId, startDate, endDate) => {
     const query = `
       SELECT 
@@ -145,7 +155,33 @@ const PayrollService = {
     };
   },
 
-  // --- WORKER: Overtime Calculation ---
+  // --- [FIXED] WORKER 2: Paid Leave Stats ---
+  getPaidLeaveStats: async (client, userId, startDate, endDate) => {
+    // FIX: Removed DATE_PART. Subtracting dates directly returns the number of days (Integer).
+    const query = `
+      SELECT
+        COALESCE(SUM(
+          (LEAST(lr.end_date, $3::date) - GREATEST(lr.start_date, $2::date) + 1)
+        ), 0) as total_leave_days
+      FROM leave_requests lr
+      JOIN leave_types lt ON lr.leave_type_id = lt.id
+      WHERE lr.user_id = $1
+        AND lr.status = 'Approved'
+        AND lt.is_paid = true
+        AND lr.start_date <= $3  -- Ensure overlap with pay period
+        AND lr.end_date >= $2
+    `;
+
+    const result = await client.query(query, [userId, startDate, endDate]);
+    const days = parseInt(result.rows[0].total_leave_days || 0);
+
+    return {
+      days: days,
+      hours: days * 8 // Assuming 8 hours per paid leave day
+    };
+  },
+
+  // --- WORKER 3: Overtime Calculation ---
   calculateOvertime: async (client, userId, startDate, endDate, hourlyRate) => {
     const query = `
       SELECT 
@@ -186,11 +222,73 @@ const PayrollService = {
     };
   },
 
+  // --- WORKER 4: Deductions ---
+  calculateDeductions: async (client, userId, basicPay) => {
+    let totalDeduction = 0;
+    const breakdown = [];
+
+    const query = `
+      SELECT 
+        dp.id as plan_id, 
+        dp.name, 
+        dp.deduction_type, 
+        dp.amount as plan_amount,
+        dp.is_global,
+        ds.total_loan_amount, 
+        ds.paid_loan_amount
+      FROM deduction_plans dp
+      LEFT JOIN deduction_subscribers ds ON dp.id = ds.deduction_plan_id AND ds.user_id = $1
+      WHERE dp.status = 'ACTIVE'
+        AND (dp.is_global = true OR ds.user_id IS NOT NULL)
+    `;
+
+    const result = await client.query(query, [userId]);
+
+    for (const plan of result.rows) {
+      let deductionAmount = 0;
+      const planValue = parseFloat(plan.plan_amount);
+
+      if (plan.deduction_type === 'PERCENTAGE') {
+        deductionAmount = basicPay * (planValue / 100);
+      } else {
+        deductionAmount = planValue;
+      }
+
+      const totalLoan = parseFloat(plan.total_loan_amount || 0);
+      
+      if (totalLoan > 0) {
+        const paidSoFar = parseFloat(plan.paid_loan_amount || 0);
+        const remainingBalance = totalLoan - paidSoFar;
+
+        if (remainingBalance < deductionAmount) {
+          deductionAmount = remainingBalance;
+        }
+        if (remainingBalance <= 0) deductionAmount = 0;
+      }
+
+      if (deductionAmount > 0) {
+        deductionAmount = parseFloat(deductionAmount.toFixed(2));
+        totalDeduction += deductionAmount;
+
+        breakdown.push({
+          plan_id: plan.plan_id,
+          name: plan.name,
+          amount: deductionAmount,
+          is_global: plan.is_global
+        });
+      }
+    }
+
+    return {
+      total_amount: totalDeduction,
+      breakdown: breakdown
+    };
+  },
+
   // ==========================================
   // 3. READ & DELETE OPERATIONS
   // ==========================================
 
-  // For the "Run Details" Page (3 Cards + Table)
   getPayRunDetails: async (id) => {
     const runQuery = `SELECT * FROM pay_runs WHERE id = $1`;
 
@@ -225,7 +323,6 @@ const PayrollService = {
     };
   },
 
-  // For the "Payroll History" Page (Admin)
   getAllPayRuns: async () => {
     const result = await pool.query(`
       SELECT pr.*, 
@@ -237,7 +334,6 @@ const PayrollService = {
     return result.rows;
   },
 
-  // For the "Global Payroll Records" (Admin Report)
   getAllPayrollRecords: async () => {
     const query = `
       SELECT 
@@ -258,7 +354,6 @@ const PayrollService = {
     return result.rows;
   },
 
-  // For the "My Payslips" Page (Employee)
   getUserPayrollRecords: async (userId) => {
     const query = `
       SELECT 
@@ -283,81 +378,7 @@ const PayrollService = {
     if (result.rowCount === 0) {
       throw new Error("Pay Run not found");
     }
-
     return result.rows[0];
-  },
-
-
-
-
-  
-  // --- WORKER 3: NEW CALCULATION LOGIC ---
-  calculateDeductions: async (client, userId, basicPay) => {
-    let totalDeduction = 0;
-    const breakdown = [];
-
-    // QUERY: Fetch Plans relevant to this User
-    // Condition A: Plan is GLOBAL
-    // Condition B: Plan is linked to this User in SUBSCRIBERS table
-    const query = `
-      SELECT 
-        dp.id as plan_id, 
-        dp.name, 
-        dp.deduction_type, 
-        dp.amount as plan_amount,
-        dp.is_global,
-        ds.total_loan_amount, 
-        ds.paid_loan_amount
-      FROM deduction_plans dp
-      LEFT JOIN deduction_subscribers ds ON dp.id = ds.deduction_plan_id AND ds.user_id = $1
-      WHERE dp.status = 'ACTIVE'
-        AND (dp.is_global = true OR ds.user_id IS NOT NULL)
-    `;
-
-    const result = await client.query(query, [userId]);
-
-    for (const plan of result.rows) {
-      let deductionAmount = 0;
-      const planValue = parseFloat(plan.plan_amount);
-
-      // 1. Calculate Amount (Fixed vs Percentage)
-      if (plan.deduction_type === 'PERCENTAGE') {
-        deductionAmount = basicPay * (planValue / 100);
-      } else {
-        deductionAmount = planValue;
-      }
-
-      // 2. Loan Logic (Only if the User has a specific loan balance in subscribers table)
-      const totalLoan = parseFloat(plan.total_loan_amount || 0);
-      
-      if (totalLoan > 0) {
-        const paidSoFar = parseFloat(plan.paid_loan_amount || 0);
-        const remainingBalance = totalLoan - paidSoFar;
-
-        if (remainingBalance < deductionAmount) {
-          deductionAmount = remainingBalance;
-        }
-        if (remainingBalance <= 0) deductionAmount = 0;
-      }
-
-      // 3. Add to Total
-      if (deductionAmount > 0) {
-        deductionAmount = parseFloat(deductionAmount.toFixed(2));
-        totalDeduction += deductionAmount;
-
-        breakdown.push({
-          plan_id: plan.plan_id,
-          name: plan.name,
-          amount: deductionAmount,
-          is_global: plan.is_global
-        });
-      }
-    }
-
-    return {
-      total_amount: totalDeduction,
-      breakdown: breakdown
-    };
   },
 
   // ==========================================
@@ -382,11 +403,7 @@ const PayrollService = {
         const deductions = details.deduction_breakdown || [];
 
         for (const item of deductions) {
-          // item.plan_id comes from our calculateDeductions breakdown
           if (item.plan_id) {
-            
-            // INSERT INTO LEDGER
-            // We now include 'user_id' so the trigger knows whose balance to update
             await client.query(
               `INSERT INTO deduction_ledger 
                (pay_run_id, deduction_plan_id, user_id, amount_paid)
@@ -397,7 +414,6 @@ const PayrollService = {
         }
       }
 
-      // 2. Mark Pay Run as 'Completed'
       await client.query(
         "UPDATE pay_runs SET status = 'Completed' WHERE id = $1", 
         [payRunId]

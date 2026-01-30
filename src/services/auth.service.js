@@ -1,14 +1,10 @@
 import pool from "../config/db.js";
 
-
 export const registerUser = async (userData) => {
-  const { fullname, email, password, role_id, payrate, position, branch } =
-    userData;
+  const { fullname, email, password, role_id, payrate, position, branch } = userData;
 
   // 1. Check if user exists
-  const userCheck = await pool.query("SELECT * FROM users WHERE email = $1", [
-    email,
-  ]);
+  const userCheck = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
   if (userCheck.rows.length > 0) {
     throw new Error("User already exists!");
   }
@@ -23,10 +19,14 @@ export const registerUser = async (userData) => {
 };
 
 export const loginUser = async (email, password) => {
-  // 1. Find User
-  const result = await pool.query("SELECT * FROM users WHERE email = $1", [
-    email,
-  ]);
+  const query = `
+    SELECT u.*, r.role_name 
+    FROM users u 
+    LEFT JOIN roles r ON u.role_id = r.id 
+    WHERE u.email = $1
+  `;
+  
+  const result = await pool.query(query, [email]);
 
   if (result.rows.length === 0) {
     throw new Error("Invalid Credentials");
@@ -39,11 +39,14 @@ export const loginUser = async (email, password) => {
     throw new Error("Invalid Credentials");
   }
 
+  // 3. Remove password from the object before sending to frontend
+  delete user.password;
+
   return user;
 };
 
 export const getUserById = async (userId) => {
-  // 1. Query database for the user ID (Also updated to fetch role_name if needed)
+  // 1. Query database (ADDED: daily_rate, profile_picture)
   const result = await pool.query(
     `SELECT 
       u.id, 
@@ -52,10 +55,12 @@ export const getUserById = async (userId) => {
       u.role_id,
       r.role_name, 
       u.payrate, 
+      u.daily_rate,  
       u.position, 
       u.branch, 
       u."isActive", 
-      u.created_at 
+      u.created_at,
+      u.profile_picture  
      FROM users u
      LEFT JOIN roles r ON u.role_id = r.id
      WHERE u.id = $1`,

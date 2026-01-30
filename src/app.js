@@ -16,29 +16,33 @@ import overtimeRoutes from "./routes/overtime.routes.js";
 import payrollRoutes from "./routes/payroll.routes.js";
 import deductionRoutes from "./routes/deduction.routes.js";
 
+const allowedOrigins = ["http://localhost:3000"];
+
 export const app = express();
 const server = http.createServer(app);
-
-// Socket.IO configuration
 const io = new SocketIO(server, {
   cors: {
-    origin: true, // Allow any origin to connect
+    origin: allowedOrigins,
     credentials: true,
   },
 });
 
-// Express CORS configuration
 app.use(
   cors({
-    origin: true, // Allow any origin to connect (reflects the request origin)
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
 );
 
-app.use(express.json({ limit: "15mb" }));
+app.use(express.json({ limit: "50mb" }));
 app.use(cookieParser());
 
-// Route Middleware
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/branches", branchRoutes);
@@ -68,9 +72,7 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("A user disconnected", socket.id);
-    if (userId) {
-      delete userSocketMap[userId];
-    }
+    delete userSocketMap[userId];
   });
 });
 
