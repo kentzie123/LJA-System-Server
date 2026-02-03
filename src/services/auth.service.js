@@ -20,7 +20,22 @@ export const registerUser = async (userData) => {
 
 export const loginUser = async (email, password) => {
   const query = `
-    SELECT u.*, r.role_name 
+    SELECT 
+      u.*, 
+      r.role_name,
+      -- Employee
+      r.perm_employee_view,
+      r.perm_employee_create,
+      r.perm_employee_edit,
+      r.perm_employee_delete,
+      -- Attendance
+      r.perm_attendance_view,
+      r.perm_attendance_verify,
+      r.perm_attendance_manual,
+      r.perm_attendance_export,
+      -- Leave (NEW)
+      r.perm_leave_view_all,
+      r.perm_leave_approve
     FROM users u 
     LEFT JOIN roles r ON u.role_id = r.id 
     WHERE u.email = $1
@@ -28,50 +43,72 @@ export const loginUser = async (email, password) => {
   
   const result = await pool.query(query, [email]);
 
-  if (result.rows.length === 0) {
-    throw new Error("Invalid Credentials");
-  }
+  if (result.rows.length === 0) throw new Error("Invalid Credentials");
 
   const user = result.rows[0];
 
-  // 2. Check Password
-  if (password !== user.password) {
-    throw new Error("Invalid Credentials");
-  }
+  if (password !== user.password) throw new Error("Invalid Credentials");
 
-  // 3. Remove password from the object before sending to frontend
   delete user.password;
+
+  // Transform role object
+  user.role = {
+    id: user.role_id,
+    name: user.role_name,
+    // Employee
+    perm_employee_view: user.perm_employee_view,
+    perm_employee_create: user.perm_employee_create,
+    perm_employee_edit: user.perm_employee_edit,
+    perm_employee_delete: user.perm_employee_delete,
+    // Attendance
+    perm_attendance_view: user.perm_attendance_view,
+    perm_attendance_verify: user.perm_attendance_verify,
+    perm_attendance_manual: user.perm_attendance_manual,
+    perm_attendance_export: user.perm_attendance_export,
+    // Leave
+    perm_leave_view_all: user.perm_leave_view_all,
+    perm_leave_approve: user.perm_leave_approve,
+  };
 
   return user;
 };
 
 export const getUserById = async (userId) => {
-  // 1. Query database (ADDED: daily_rate, profile_picture)
   const result = await pool.query(
     `SELECT 
-      u.id, 
-      u.fullname, 
-      u.email, 
-      u.role_id,
-      r.role_name, 
-      u.payrate, 
-      u.daily_rate,  
-      u.position, 
-      u.branch, 
-      u."isActive", 
-      u.created_at,
-      u.profile_picture  
-     FROM users u
-     LEFT JOIN roles r ON u.role_id = r.id
-     WHERE u.id = $1`,
+      u.id, u.fullname, u.email, u.role_id, u.payrate, u.position, u.branch, u."isActive", u.profile_picture,
+      r.role_name,
+      -- Employee
+      r.perm_employee_view, r.perm_employee_create, r.perm_employee_edit, r.perm_employee_delete,
+      -- Attendance
+      r.perm_attendance_view, r.perm_attendance_verify, r.perm_attendance_manual, r.perm_attendance_export,
+      -- Leave
+      r.perm_leave_view_all, r.perm_leave_approve
+      FROM users u
+      LEFT JOIN roles r ON u.role_id = r.id
+      WHERE u.id = $1`,
     [userId]
   );
 
-  // 2. Check if user was found
-  if (result.rows.length === 0) {
-    throw new Error("User not found");
-  }
+  if (result.rows.length === 0) throw new Error("User not found");
 
-  // 3. Return the user
-  return result.rows[0];
+  const user = result.rows[0];
+
+  user.role = {
+    id: user.role_id,
+    name: user.role_name,
+    perm_employee_view: user.perm_employee_view,
+    perm_employee_create: user.perm_employee_create,
+    perm_employee_edit: user.perm_employee_edit,
+    perm_employee_delete: user.perm_employee_delete,
+    perm_attendance_view: user.perm_attendance_view,
+    perm_attendance_verify: user.perm_attendance_verify,
+    perm_attendance_manual: user.perm_attendance_manual,
+    perm_attendance_export: user.perm_attendance_export,
+    // Leave
+    perm_leave_view_all: user.perm_leave_view_all,
+    perm_leave_approve: user.perm_leave_approve,
+  };
+
+  return user;
 };

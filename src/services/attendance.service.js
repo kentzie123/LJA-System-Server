@@ -78,6 +78,7 @@ export const getAllAttendance = async () => {
       a.*, 
       u.fullname,
       u.email,
+      u.profile_picture,
       (SELECT string_agg(substring(n from 1 for 1), '') 
        FROM regexp_split_to_table(u.fullname, '\s+') as n) as initials
     FROM attendance a

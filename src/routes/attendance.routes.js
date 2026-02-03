@@ -9,23 +9,61 @@ import {
   getStatus,
   verifyAttendance,
 } from "../controllers/attendance.contoller.js";
-import { verifyToken } from "../middleware/verifyToken.js";
-import { requireRole } from "../middleware/roleVerificationToken.js";
+import { verifyToken, checkPermission } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// Clocking Actions
-router.post("/manual", requireRole(1, 3), createManualEntry);
+// --- ADMIN / MANAGER ROUTES (Protected by Permissions) ---
 
-// Data Fetching
-router.get("/", requireRole(1, 3), getAllAttendance);
+// 1. View All Attendance Logs
+// Checks 'perm_attendance_view'
+router.get(
+  "/", 
+  verifyToken, 
+  checkPermission("perm_attendance_view"), 
+  getAllAttendance
+);
 
-// Management Actions (Edit/Delete/Verify)
-router.put("/:id", requireRole(1, 3), updateAttendance);
-router.delete("/:id", requireRole(1, 3), deleteAttendance);
-router.put("/verify/:id", requireRole(1, 3), verifyAttendance);
+// 2. Manual Entry (Add Log manually)
+// Checks 'perm_attendance_manual'
+router.post(
+  "/manual", 
+  verifyToken, 
+  checkPermission("perm_attendance_manual"), 
+  createManualEntry
+);
 
-// User Clocking Actions
+// 3. Update/Edit Existing Log
+// Checks 'perm_attendance_manual' (Treating edit as a manual intervention)
+router.put(
+  "/:id", 
+  verifyToken, 
+  checkPermission("perm_attendance_manual"), 
+  updateAttendance
+);
+
+// 4. Delete Log
+// Checks 'perm_attendance_manual' (or you could create a specific delete perm)
+router.delete(
+  "/:id", 
+  verifyToken, 
+  checkPermission("perm_attendance_manual"), 
+  deleteAttendance
+);
+
+// 5. Verify / Approve Log
+// Checks 'perm_attendance_verify'
+router.put(
+  "/verify/:id", 
+  verifyToken, 
+  checkPermission("perm_attendance_verify"), 
+  verifyAttendance
+);
+
+
+// --- EMPLOYEE SELF-SERVICE (Available to ALL logged-in users) ---
+// These do NOT check specific role permissions because all employees need to clock in.
+
 router.post("/clock-in", verifyToken, clockIn);
 router.post("/clock-out", verifyToken, clockOut);
 router.get("/status/current", verifyToken, getStatus);
