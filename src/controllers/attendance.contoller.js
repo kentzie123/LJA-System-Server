@@ -99,3 +99,20 @@ export const verifyAttendance = async (req, res) => {
     res.status(400).json({ message: error.message });
   }
 };
+
+export const verifyWorkday = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const adminId = req.user.userId;
+    const { status } = req.body; // Expects { status: "Verified" } or "Rejected"
+
+    const record = await AttendanceService.verifyWorkday(id, adminId, status);
+    
+    res.status(200).json({ 
+      message: `Workday ${status} successfully`, 
+      data: record 
+    });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};

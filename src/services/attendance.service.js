@@ -258,3 +258,26 @@ export const verifyAttendance = async (id, adminId, verificationData) => {
 
   return result.rows[0];
 };  
+
+
+export const verifyWorkday = async (id, adminId, status) => {
+  const query = `
+    UPDATE attendance
+    SET 
+      status_in = $1,
+      status_out = $1,
+      verified_by_in = $2,
+      verified_by_out = $2,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = $3
+    RETURNING *
+  `;
+
+  const result = await pool.query(query, [status, adminId, id]);
+
+  if (result.rows.length === 0) {
+    throw new Error("Attendance record not found.");
+  }
+
+  return result.rows[0];
+};
