@@ -33,9 +33,20 @@ export const loginUser = async (email, password) => {
       r.perm_attendance_verify,
       r.perm_attendance_manual,
       r.perm_attendance_export,
-      -- Leave (NEW)
-      r.perm_leave_view_all,
-      r.perm_leave_approve
+      -- Leave
+      r.perm_leave_view, 
+      r.perm_leave_view_all, 
+      r.perm_leave_approve,
+      -- Overtime
+      r.perm_overtime_view,
+      r.perm_overtime_view_all,
+      r.perm_overtime_approve,
+      -- Payroll
+      r.perm_payroll_view,
+      r.perm_payroll_manage,
+      -- Role Management (NEW)
+      r.perm_role_view,
+      r.perm_role_manage
     FROM users u 
     LEFT JOIN roles r ON u.role_id = r.id 
     WHERE u.email = $1
@@ -66,8 +77,19 @@ export const loginUser = async (email, password) => {
     perm_attendance_manual: user.perm_attendance_manual,
     perm_attendance_export: user.perm_attendance_export,
     // Leave
+    perm_leave_view: user.perm_leave_view,
     perm_leave_view_all: user.perm_leave_view_all,
     perm_leave_approve: user.perm_leave_approve,
+    // Overtime
+    perm_overtime_view: user.perm_overtime_view,
+    perm_overtime_view_all: user.perm_overtime_view_all,
+    perm_overtime_approve: user.perm_overtime_approve,
+    // Payroll
+    perm_payroll_view: user.perm_payroll_view,
+    perm_payroll_manage: user.perm_payroll_manage,
+    // Role Management
+    perm_role_view: user.perm_role_view,
+    perm_role_manage: user.perm_role_manage,
   };
 
   return user;
@@ -83,7 +105,13 @@ export const getUserById = async (userId) => {
       -- Attendance
       r.perm_attendance_view, r.perm_attendance_verify, r.perm_attendance_manual, r.perm_attendance_export,
       -- Leave
-      r.perm_leave_view_all, r.perm_leave_approve
+      r.perm_leave_view, r.perm_leave_view_all, r.perm_leave_approve,
+      -- Overtime
+      r.perm_overtime_view, r.perm_overtime_view_all, r.perm_overtime_approve,
+      -- Payroll
+      r.perm_payroll_view, r.perm_payroll_manage,
+      -- Role Management
+      r.perm_role_view, r.perm_role_manage
       FROM users u
       LEFT JOIN roles r ON u.role_id = r.id
       WHERE u.id = $1`,
@@ -106,8 +134,19 @@ export const getUserById = async (userId) => {
     perm_attendance_manual: user.perm_attendance_manual,
     perm_attendance_export: user.perm_attendance_export,
     // Leave
+    perm_leave_view: user.perm_leave_view,
     perm_leave_view_all: user.perm_leave_view_all,
     perm_leave_approve: user.perm_leave_approve,
+    // Overtime
+    perm_overtime_view: user.perm_overtime_view,
+    perm_overtime_view_all: user.perm_overtime_view_all,
+    perm_overtime_approve: user.perm_overtime_approve,
+    // Payroll
+    perm_payroll_view: user.perm_payroll_view,
+    perm_payroll_manage: user.perm_payroll_manage,
+    // Role Management
+    perm_role_view: user.perm_role_view,
+    perm_role_manage: user.perm_role_manage,
   };
 
   return user;

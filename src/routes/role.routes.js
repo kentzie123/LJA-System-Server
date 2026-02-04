@@ -1,13 +1,19 @@
 import express from "express";
-import { verifyToken } from "../middleware/authMiddleware.js"; // Updated import path
-import { fetchRoles, modifyRole } from "../controllers/role.controller.js";
+import { 
+  getRoles, 
+  updateRolePermissions, 
+  createRole, 
+  deleteRole 
+} from "../controllers/role.controller.js";
+
+// FIXED IMPORT:
+import { verifyToken } from "../middleware/verifyToken.js"; 
 
 const router = express.Router();
 
-// GET /api/roles - Fetch all roles & permissions
-router.get("/", verifyToken, fetchRoles);
-
-// PUT /api/roles/:id - Update permissions
-router.put("/:id", verifyToken, modifyRole);
+router.get("/", verifyToken, getRoles);
+router.post("/", verifyToken, createRole);
+router.put("/:id", verifyToken, updateRolePermissions);
+router.delete("/:id", verifyToken, deleteRole);
 
 export default router;

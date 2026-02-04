@@ -1,34 +1,57 @@
 import * as roleService from "../services/role.service.js";
 
-// 1. Fetch All Roles
-export const fetchRoles = async (req, res) => {
+// Get All
+export const getRoles = async (req, res) => {
   try {
     const roles = await roleService.getAllRoles();
-    res.status(200).json(roles);
-  } catch (err) {
-    console.error("Error fetching roles:", err);
-    res.status(500).json({ error: "Failed to fetch roles" });
+    res.json(roles);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 };
 
-// 2. Update Role Permissions
-export const modifyRole = async (req, res) => {
+// Create
+export const createRole = async (req, res) => {
   try {
-    const { id } = req.params;
-    const permissions = req.body; // Expects { perm_employee_view: true, ... }
-
-    const updatedRole = await roleService.updateRole(id, permissions);
-
-    if (!updatedRole) {
-      return res.status(404).json({ error: "Role not found" });
+    const { role_name } = req.body;
+    
+    if (!role_name) {
+      return res.status(400).json({ message: "Role name is required" });
     }
 
-    res.status(200).json({
-      message: "Role permissions updated successfully",
-      role: updatedRole,
-    });
-  } catch (err) {
-    console.error("Error updating role:", err);
-    res.status(500).json({ error: "Failed to update role" });
+    const newRole = await roleService.createRole(role_name);
+    res.status(201).json(newRole);
+  } catch (error) {
+    // Handle duplicate error gracefully
+    if (error.message === "Role already exists") {
+      return res.status(409).json({ message: error.message });
+    }
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Update
+export const updateRolePermissions = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updatedRole = await roleService.updateRole(id, req.body);
+    res.json(updatedRole);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Delete
+export const deleteRole = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await roleService.deleteRole(id);
+    res.json({ message: "Role deleted successfully" });
+  } catch (error) {
+    // Catch the specific safety errors we threw in the service
+    if (error.message.includes("Cannot delete") || error.message.includes("System Admin")) {
+      return res.status(400).json({ message: error.message });
+    }
+    res.status(500).json({ message: error.message });
   }
 };

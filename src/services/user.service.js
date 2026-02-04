@@ -17,6 +17,7 @@ export const getAllUsers = async () => {
       u.daily_rate
     FROM users u
     LEFT JOIN roles r ON u.role_id = r.id
+    WHERE u.role_id NOT IN (1, 3)  -- Excludes Admin (1) and Super Admin (3)
     ORDER BY u.id ASC
   `);
   return result.rows;
