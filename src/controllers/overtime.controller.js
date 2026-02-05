@@ -24,7 +24,7 @@ export const getAllOvertime = async (req, res) => {
   }
 };
 
-// POST /api/overtime/create
+// POST /api/overtime/create (Standard Employee Request)
 export const createOvertimeRequest = async (req, res) => {
   try {
     const { date, startTime, endTime, reason, otTypeId } = req.body;
@@ -54,18 +54,56 @@ export const createOvertimeRequest = async (req, res) => {
   }
 };
 
+// POST /api/overtime/create-admin (Admin Assign Overtime)
+export const createAdminOvertimeRequest = async (req, res) => {
+  try {
+    const { targetUserId, date, startTime, endTime, reason, otTypeId } = req.body;
+    
+    // Note: Permission check (perm_overtime_manage) is handled by the route middleware
+
+    // Basic Validation
+    if (!targetUserId || !date || !startTime || !endTime || !reason || !otTypeId) {
+      return res.status(400).json({ message: "All fields are required." });
+    }
+
+    const newRequest = await OvertimeService.createAdminOvertimeRequest({
+      targetUserId,
+      date,
+      startTime,
+      endTime,
+      reason,
+      otTypeId,
+    });
+
+    res.status(201).json({
+      message: "Overtime assigned successfully",
+      data: newRequest,
+    });
+  } catch (error) {
+    console.error("Admin Create Overtime Error:", error);
+    res.status(400).json({ message: error.message });
+  }
+};
+
 // DELETE /api/overtime/:id
 export const deleteOvertimeRequest = async (req, res) => {
   try {
     const { id } = req.params;
     const roleId = req.user.role_id;
+    const userId = req.user.userId;
 
     // Check if request exists
     const request = await OvertimeService.getOvertimeById(id);
     if (!request) return res.status(404).json({ message: "Request not found" });
 
-    // Permissions: Admin can delete anything; User can only delete Pending
+    // Permissions: Admin can delete anything; User can only delete THEIR OWN Pending requests
     const isAdmin = roleId === 1 || roleId === 3;
+    const isOwner = request.user_id === userId;
+
+    if (!isAdmin && !isOwner) {
+       return res.status(403).json({ message: "Unauthorized action." });
+    }
+
     if (!isAdmin && request.status !== "Pending") {
       return res
         .status(403)
@@ -86,11 +124,19 @@ export const updateOvertimeRequest = async (req, res) => {
     const { id } = req.params;
     const data = req.body; // { date, startTime, endTime, reason, otTypeId }
     const roleId = req.user.role_id;
+    const userId = req.user.userId;
 
     const request = await OvertimeService.getOvertimeById(id);
     if (!request) return res.status(404).json({ message: "Request not found" });
 
     const isAdmin = roleId === 1 || roleId === 3;
+    
+    // Check Ownership
+    if (!isAdmin && request.user_id !== userId) {
+        return res.status(403).json({ message: "Unauthorized action." });
+    }
+
+    // Check Status (Only Pending can be edited by non-admins)
     if (!isAdmin && request.status !== "Pending") {
       return res
         .status(403)
@@ -120,5 +166,19 @@ export const updateOvertimeStatus = async (req, res) => {
   } catch (error) {
     console.error("Update Status Error:", error);
     res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+export const getOvertimeStats = async (req, res) => {
+  try {
+    // req.user is populated by your verifyToken middleware
+    const userId = req.user.userId;
+    const roleId = req.user.role_id;
+
+    const stats = await OvertimeService.getOvertimeStats(userId, roleId);
+    res.status(200).json(stats);
+  } catch (error) {
+    console.error("Fetch Stats Error:", error);
+    res.status(500).json({ message: "Failed to fetch statistics" });
   }
 };

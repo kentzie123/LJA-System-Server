@@ -18,9 +18,13 @@ const PayrollService = {
       );
       const payRunId = runRes.rows[0].id;
 
-      // B. Get All Active Employees
+      // B. Get All Active Employees (EXCLUDING Admin & Super Admin)
+      // -----------------------------------------------------------
+      // We added: AND role_id NOT IN (1, 3)
       const usersRes = await client.query(
-        `SELECT id, fullname, daily_rate FROM users WHERE "isActive" = true`
+        `SELECT id, fullname, daily_rate FROM users 
+         WHERE "isActive" = true 
+         AND role_id NOT IN (1, 3)` 
       );
 
       // C. THE MAIN CALCULATION LOOP
@@ -37,7 +41,7 @@ const PayrollService = {
           end_date
         );
 
-        // 3. [FIXED] Calculate Paid Leave
+        // 3. Calculate Paid Leave
         const leaveStats = await PayrollService.getPaidLeaveStats(
           client,
           user.id,
@@ -46,7 +50,6 @@ const PayrollService = {
         );
 
         // 4. Calculate Basic Pay (Worked Hours + Paid Leave Hours)
-        // We add the leave hours to the worked hours before multiplying
         const totalPaidHours = attendance.total_worked_hours + leaveStats.hours;
         const basicPay = totalPaidHours * hourlyRate;
 
@@ -155,9 +158,8 @@ const PayrollService = {
     };
   },
 
-  // --- [FIXED] WORKER 2: Paid Leave Stats ---
+  // --- WORKER 2: Paid Leave Stats ---
   getPaidLeaveStats: async (client, userId, startDate, endDate) => {
-    // FIX: Removed DATE_PART. Subtracting dates directly returns the number of days (Integer).
     const query = `
       SELECT
         COALESCE(SUM(
@@ -168,7 +170,7 @@ const PayrollService = {
       WHERE lr.user_id = $1
         AND lr.status = 'Approved'
         AND lt.is_paid = true
-        AND lr.start_date <= $3  -- Ensure overlap with pay period
+        AND lr.start_date <= $3  
         AND lr.end_date >= $2
     `;
 
@@ -177,7 +179,7 @@ const PayrollService = {
 
     return {
       days: days,
-      hours: days * 8 // Assuming 8 hours per paid leave day
+      hours: days * 8 
     };
   },
 
