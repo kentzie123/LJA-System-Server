@@ -1,4 +1,3 @@
-// src/app.js
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -15,6 +14,8 @@ import leaveRoutes from "./routes/leave.routes.js";
 import overtimeRoutes from "./routes/overtime.routes.js";
 import payrollRoutes from "./routes/payroll.routes.js";
 import deductionRoutes from "./routes/deduction.routes.js";
+import dashboardRoutes from "./routes/dashboard.routes.js";
+import allowanceRoutes from "./routes/allowance.routes.js";
 
 const allowedOrigins = ["http://localhost:3000"];
 
@@ -27,6 +28,12 @@ const io = new SocketIO(server, {
   },
 });
 
+// --- 1. MIDDLEWARE TO INJECT IO ---
+app.use((req, res, next) => {
+  req.io = io;
+  next();
+});
+
 app.use(
   cors({
     origin: function (origin, callback) {
@@ -37,12 +44,13 @@ app.use(
       }
     },
     credentials: true,
-  })
+  }),
 );
 
 app.use(express.json({ limit: "50mb" }));
 app.use(cookieParser());
 
+// Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/branches", branchRoutes);
@@ -52,6 +60,8 @@ app.use("/api/leave", leaveRoutes);
 app.use("/api/overtime", overtimeRoutes);
 app.use("/api/payroll", payrollRoutes);
 app.use("/api/deductions", deductionRoutes);
+app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/allowance", allowanceRoutes);
 
 app.get("/api/status", (req, res) => {
   res.json({
@@ -66,13 +76,27 @@ const userSocketMap = {};
 io.on("connection", (socket) => {
   console.log("A user connected", socket.id);
 
-  const userId = socket.handshake.query.userId;
-  if (userId) userSocketMap[userId] = socket.id;
-  console.log(userSocketMap);
+  // --- 2. JOIN ROOM LOGIC ---
+  const { userId, roleId } = socket.handshake.query;
+
+  if (userId) {
+    userSocketMap[userId] = socket.id;
+
+    // [NEW] JOIN PERSONAL ROOM
+    // This allows us to do: req.io.to("user_15").emit(...)
+    socket.join(`user_${userId}`);
+    console.log(`User ${userId} joined room: user_${userId}`);
+  }
+
+  // Admin Room Logic (System Admin=1, Super Admin=3)
+  if (roleId === "1" || roleId === "3") {
+    socket.join("admin_room");
+    console.log(`User ${userId} (Role ${roleId}) joined admin_room`);
+  }
 
   socket.on("disconnect", () => {
     console.log("A user disconnected", socket.id);
-    delete userSocketMap[userId];
+    if (userId) delete userSocketMap[userId];
   });
 });
 

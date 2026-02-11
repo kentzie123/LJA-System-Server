@@ -5,25 +5,37 @@ import {
   updatePlan,
   deletePlan,
   updateSubscribers,
+  toggleStatus, // Import the new controller
 } from "../controllers/deduction.controller.js";
 
-import { requireRole } from "../middleware/roleVerificationToken.js";
+import { verifyToken, checkPermission } from "../middleware/authMiddleware.js";
 
 const router = Router();
 
-// 1. Create Deduction Plan
-router.post("/create", requireRole(1, 3), createDeduction);
+router.use(verifyToken);
 
-// 2. Get All Plans (Replaces the old separate global/user routes)
-router.get("/all", requireRole(1, 3), getAllPlans);
+// READ
+router.get("/", checkPermission("perm_deduction_view"), getAllPlans);
 
-// 3. Update Plan (Edit Name, Amount, or Status)
-router.patch("/:id", requireRole(1, 3), updatePlan);
+// WRITE
+router.post(
+  "/create",
+  checkPermission("perm_deduction_manage"),
+  createDeduction,
+);
+router.put("/:id", checkPermission("perm_deduction_manage"), updatePlan);
+router.delete("/:id", checkPermission("perm_deduction_manage"), deletePlan);
+router.put(
+  "/:id/subscribers",
+  checkPermission("perm_deduction_manage"),
+  updateSubscribers,
+);
 
-// 4. Delete Plan
-router.delete("/:id", requireRole(1, 3), deletePlan);
-
-// 5. Manage Subscribers (Add/Remove Users from a Plan)
-router.post("/:id/subscribers", requireRole(1, 3), updateSubscribers);
+// TOGGLE STATUS -- ADDED THIS
+router.patch(
+  "/:id/status",
+  checkPermission("perm_deduction_manage"),
+  toggleStatus,
+);
 
 export default router;

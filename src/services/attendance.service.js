@@ -3,12 +3,11 @@ import pool from "../config/db.js";
 // ==========================================
 // HELPER: THE PAYROLL MATH (Only affects worked_hours)
 // ==========================================
-// 1. START TIME: Caps calculation at 8:15 AM (ignores time before).
-// 2. END TIME:   Caps calculation at 5:00 PM (17:00:00).
-// 3. LUNCH:      Subtracts any overlap with 12:00 PM - 1:00 PM.
-//
-// NOTE: This math DOES NOT change the 'time_in' or 'time_out' columns.
-//       It only calculates the 'worked_hours' number.
+// 1. GRACE PERIOD: If Time In is < 8:16 AM, we calculate from 8:00 AM.
+//                  If Time In is >= 8:16 AM, we calculate from actual Time In.
+// 2. END TIME:     Caps calculation at 5:00 PM (17:00:00).
+// 3. LUNCH:        Subtracts any overlap with 12:00 PM - 1:00 PM.
+
 const WORKED_HOURS_SQL = `
   ROUND(CAST(
     GREATEST(0, 
@@ -16,7 +15,14 @@ const WORKED_HOURS_SQL = `
         -- A. Raw Duration (Effective End - Effective Start)
         EXTRACT(EPOCH FROM (
           LEAST($4::TIME, '17:00:00'::TIME) -         -- End Cap: 5:00 PM
-          GREATEST($3::TIME, '08:15:00'::TIME)        -- Start Cap: 8:15 AM
+          
+          -- FIX: LOGIC FOR START TIME
+          -- If time_in is less than 08:16:00 (Grace Period), treat it as 08:00:00
+          -- Otherwise, use the actual time_in (LATE)
+          CASE 
+            WHEN $3::TIME < '08:16:00'::TIME THEN '08:00:00'::TIME
+            ELSE $3::TIME
+          END
         )) / 3600
       ) 
       - 
@@ -25,7 +31,14 @@ const WORKED_HOURS_SQL = `
         GREATEST(0, 
           EXTRACT(EPOCH FROM (
             LEAST(LEAST($4::TIME, '17:00:00'::TIME), '13:00:00'::TIME) - 
-            GREATEST(GREATEST($3::TIME, '08:15:00'::TIME), '12:00:00'::TIME)
+            GREATEST(
+              -- Apply same Start Time logic for Lunch calculation
+              CASE 
+                WHEN $3::TIME < '08:16:00'::TIME THEN '08:00:00'::TIME
+                ELSE $3::TIME
+              END, 
+              '12:00:00'::TIME
+            )
           )) / 3600
         )
       )
@@ -280,4 +293,23 @@ export const verifyWorkday = async (id, adminId, status) => {
   }
 
   return result.rows[0];
+};
+
+
+export const getAttendanceById = async (id) => {
+  const query = `
+    SELECT 
+      a.*,
+      u.fullname,
+      u.email,
+      u.profile_picture,
+      (SELECT string_agg(substring(n from 1 for 1), '') 
+       FROM regexp_split_to_table(u.fullname, '\s+') as n) as initials
+    FROM attendance a
+    JOIN users u ON a.user_id = u.id
+    WHERE a.id = $1
+  `;
+  
+  const { rows } = await pool.query(query, [id]);
+  return rows[0];
 };

@@ -1,9 +1,20 @@
 import * as roleService from "../services/role.service.js";
 
-// Get All
+// Get All (Filtered: Hides Super Admin ID 3)
 export const getRoles = async (req, res) => {
   try {
     const roles = await roleService.getAllRoles();
+    res.json(roles);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Get All System (Unfiltered: Shows Super Admin) - NEW
+export const getSystemRoles = async (req, res) => {
+  try {
+    // Requires getAllRolesUnfiltered to be exported in role.service.js
+    const roles = await roleService.getAllRolesUnfiltered();
     res.json(roles);
   } catch (error) {
     res.status(500).json({ message: error.message });

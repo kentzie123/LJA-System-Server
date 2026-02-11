@@ -19,17 +19,14 @@ const PayrollService = {
       const payRunId = runRes.rows[0].id;
 
       // B. Get All Active Employees (EXCLUDING Admin & Super Admin)
-      // -----------------------------------------------------------
-      // We added: AND role_id NOT IN (1, 3)
       const usersRes = await client.query(
         `SELECT id, fullname, daily_rate FROM users 
          WHERE "isActive" = true 
-         AND role_id NOT IN (1, 3)` 
+         AND role_id NOT IN (1, 3)`
       );
 
       // C. THE MAIN CALCULATION LOOP
       for (const user of usersRes.rows) {
-        
         // 1. Calculate Hourly Rate (Daily / 8)
         const hourlyRate = PayrollService.calculateHourlyRate(user.daily_rate);
 
@@ -63,20 +60,26 @@ const PayrollService = {
         );
         const totalOvertime = overtimeData.total_amount;
 
-        // 6. CALCULATE DEDUCTIONS
+        // 6. CALCULATE ALLOWANCES (New Implementation)
+        const allowanceData = await PayrollService.calculateAllowances(
+          client,
+          user.id
+        );
+        const totalAllowances = allowanceData.total_amount;
+
+        // 7. CALCULATE DEDUCTIONS
         const deductionData = await PayrollService.calculateDeductions(
           client,
           user.id,
-          basicPay 
+          basicPay
         );
-        
         const totalDeductions = deductionData.total_amount;
-        const totalAllowances = 0.0; 
 
-        // 7. Calculate Net Pay
+        // 8. Calculate Net Pay
+        // Formula: Basic + OT + Allowances - Deductions
         const netPay = basicPay + totalOvertime + totalAllowances - totalDeductions;
 
-        // 8. Build the JSON Receipt (Details for Payslip)
+        // 9. Build the JSON Receipt (Details for Payslip)
         const detailsPayload = {
           attendance_summary: {
             days_present: attendance.days_present,
@@ -86,10 +89,11 @@ const PayrollService = {
             paid_leave_hours: leaveStats.hours,
           },
           overtime_breakdown: overtimeData.breakdown,
-          deduction_breakdown: deductionData.breakdown, 
+          allowance_breakdown: allowanceData.breakdown, // Added Allowances here
+          deduction_breakdown: deductionData.breakdown,
         };
 
-        // 9. Save the Payroll Record
+        // 10. Save the Payroll Record
         await client.query(
           `INSERT INTO payroll_records 
             (pay_run_id, user_id, basic_salary, overtime_pay, allowances, deductions, net_pay, details, status)
@@ -99,10 +103,10 @@ const PayrollService = {
             user.id,
             basicPay,
             totalOvertime,
-            totalAllowances,
-            totalDeductions, 
+            totalAllowances, // Save the actual total
+            totalDeductions,
             netPay,
-            JSON.stringify(detailsPayload), 
+            JSON.stringify(detailsPayload),
           ]
         );
       }
@@ -132,15 +136,20 @@ const PayrollService = {
   getAttendanceStats: async (client, userId, startDate, endDate) => {
     const query = `
       SELECT 
+        -- 1. TOTAL WORKED HOURS
         COALESCE(SUM(worked_hours), 0) as total_worked_hours,
+
         COUNT(id) as days_present,
+
+        -- 2. TOTAL LATE HOURS (For Reporting)
         COALESCE(SUM(
           CASE 
-            WHEN time_in > '08:15:00'::time THEN 
-              EXTRACT(EPOCH FROM (time_in - '08:15:00'::time)) / 3600
+            WHEN time_in >= '08:16:00'::time THEN 
+              EXTRACT(EPOCH FROM (time_in - '08:00:00'::time)) / 3600
             ELSE 0 
           END
         ), 0) as total_late_hours
+
       FROM attendance
       WHERE user_id = $1
         AND date BETWEEN $2 AND $3
@@ -152,9 +161,11 @@ const PayrollService = {
     const row = result.rows[0];
 
     return {
-      total_worked_hours: parseFloat(row.total_worked_hours),
-      days_present: parseInt(row.days_present),
-      total_late_hours: parseFloat(parseFloat(row.total_late_hours).toFixed(2)),
+      total_worked_hours: parseFloat(row.total_worked_hours || 0),
+      days_present: parseInt(row.days_present || 0),
+      total_late_hours: parseFloat(
+        parseFloat(row.total_late_hours || 0).toFixed(2)
+      ),
     };
   },
 
@@ -179,7 +190,7 @@ const PayrollService = {
 
     return {
       days: days,
-      hours: days * 8 
+      hours: days * 8,
     };
   },
 
@@ -224,7 +235,47 @@ const PayrollService = {
     };
   },
 
-  // --- WORKER 4: Deductions ---
+  // --- WORKER 4: Allowances Calculation (NEW) ---
+  calculateAllowances: async (client, userId) => {
+    let totalAllowance = 0;
+    const breakdown = [];
+
+    // Query active allowances for this user
+    // Priority: Use ea.custom_amount if set, otherwise use at.amount (default)
+    const query = `
+      SELECT 
+        at.id as type_id,
+        at.name,
+        COALESCE(ea.custom_amount, at.amount) as final_amount
+      FROM employee_allowances ea
+      JOIN allowance_types at ON ea.allowance_type_id = at.id
+      WHERE ea.user_id = $1
+        AND ea.is_active = true
+        AND at.status = 'ACTIVE'
+    `;
+
+    const result = await client.query(query, [userId]);
+
+    for (const row of result.rows) {
+      const amount = parseFloat(row.final_amount);
+
+      if (amount > 0) {
+        totalAllowance += amount;
+        breakdown.push({
+          id: row.type_id,
+          name: row.name,
+          amount: parseFloat(amount.toFixed(2)),
+        });
+      }
+    }
+
+    return {
+      total_amount: totalAllowance,
+      breakdown: breakdown,
+    };
+  },
+
+  // --- WORKER 5: Deductions Calculation ---
   calculateDeductions: async (client, userId, basicPay) => {
     let totalDeduction = 0;
     const breakdown = [];
@@ -250,24 +301,29 @@ const PayrollService = {
       let deductionAmount = 0;
       const planValue = parseFloat(plan.plan_amount);
 
-      if (plan.deduction_type === 'PERCENTAGE') {
+      // A. Calculate Base Deduction
+      if (plan.deduction_type === "PERCENTAGE") {
         deductionAmount = basicPay * (planValue / 100);
       } else {
         deductionAmount = planValue;
       }
 
+      // B. Loan Logic (if applicable)
       const totalLoan = parseFloat(plan.total_loan_amount || 0);
-      
+
       if (totalLoan > 0) {
         const paidSoFar = parseFloat(plan.paid_loan_amount || 0);
         const remainingBalance = totalLoan - paidSoFar;
 
+        // Cap deduction at remaining balance
         if (remainingBalance < deductionAmount) {
           deductionAmount = remainingBalance;
         }
+        // If paid off, deduction is 0
         if (remainingBalance <= 0) deductionAmount = 0;
       }
 
+      // C. Add to totals
       if (deductionAmount > 0) {
         deductionAmount = parseFloat(deductionAmount.toFixed(2));
         totalDeduction += deductionAmount;
@@ -276,14 +332,14 @@ const PayrollService = {
           plan_id: plan.plan_id,
           name: plan.name,
           amount: deductionAmount,
-          is_global: plan.is_global
+          is_global: plan.is_global,
         });
       }
     }
 
     return {
       total_amount: totalDeduction,
-      breakdown: breakdown
+      breakdown: breakdown,
     };
   },
 
@@ -295,7 +351,7 @@ const PayrollService = {
     const runQuery = `SELECT * FROM pay_runs WHERE id = $1`;
 
     const recordsQuery = `
-      SELECT pr.*, u.fullname, u.position, u.email
+      SELECT pr.*, u.fullname, u.position, u.email, u.profile_picture
       FROM payroll_records pr
       JOIN users u ON pr.user_id = u.id
       WHERE pr.pay_run_id = $1
@@ -305,6 +361,7 @@ const PayrollService = {
     const totalsQuery = `
       SELECT 
         COALESCE(SUM(overtime_pay), 0) as total_overtime,
+        COALESCE(SUM(allowances), 0) as total_allowances,
         COALESCE(SUM(deductions), 0) as total_deductions,
         COALESCE(SUM(net_pay), 0) as total_net_pay
       FROM payroll_records WHERE pay_run_id = $1
@@ -399,38 +456,42 @@ const PayrollService = {
       `;
       const recordsRes = await client.query(recordsQuery, [payRunId]);
 
+      // 2. Commit Deductions to Ledger
       for (const record of recordsRes.rows) {
         const userId = record.user_id;
-        const details = record.details; 
+        const details = record.details;
         const deductions = details.deduction_breakdown || [];
 
         for (const item of deductions) {
           if (item.plan_id) {
             await client.query(
               `INSERT INTO deduction_ledger 
-               (pay_run_id, deduction_plan_id, user_id, amount_paid)
-               VALUES ($1, $2, $3, $4)`,
+                (pay_run_id, deduction_plan_id, user_id, amount_paid)
+                VALUES ($1, $2, $3, $4)`,
               [payRunId, item.plan_id, userId, item.amount]
             );
           }
         }
       }
 
+      // 3. Mark Run as Completed
       await client.query(
-        "UPDATE pay_runs SET status = 'Completed' WHERE id = $1", 
+        "UPDATE pay_runs SET status = 'Completed' WHERE id = $1",
         [payRunId]
       );
 
       await client.query("COMMIT");
-      return { success: true, message: "Pay run finalized and balances updated." };
-
+      return {
+        success: true,
+        message: "Pay run finalized and balances updated.",
+      };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
     } finally {
       client.release();
     }
-  }
+  },
 };
 
 export default PayrollService;

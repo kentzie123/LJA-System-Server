@@ -168,6 +168,7 @@ export const getAllLeaves = async (userId, roleId) => {
       lr.rejection_reason,
       u.fullname,
       u.email,
+      u.profile_picture,  -- <--- Added this line
       (SELECT string_agg(substring(n from 1 for 1), '') 
        FROM regexp_split_to_table(u.fullname, '\s+') as n) as initials,
       lt.name AS leave_type,
@@ -180,6 +181,7 @@ export const getAllLeaves = async (userId, roleId) => {
 
   const params = [];
 
+  // Assuming roleId 2 is "Employee/Staff"
   if (roleId === 2) {
     query += ` WHERE lr.user_id = $1`;
     params.push(userId);
@@ -206,11 +208,32 @@ export const getUserBalances = async (userId) => {
 };
 
 export const getLeaveById = async (id) => {
-  const result = await pool.query(
-    "SELECT * FROM leave_requests WHERE id = $1",
-    [id]
-  );
-  return result.rows[0];
+  const query = `
+    SELECT 
+      lr.id,
+      lr.user_id,
+      lr.leave_type_id,
+      lr.start_date,
+      lr.end_date,
+      lr.reason,
+      lr.status,
+      lr.created_at,
+      lr.rejection_reason,
+      u.fullname,
+      u.email,
+      u.profile_picture,
+      (SELECT string_agg(substring(n from 1 for 1), '') 
+       FROM regexp_split_to_table(u.fullname, '\\s+') as n) as initials,
+      lt.name AS leave_type,
+      lt.color_code,
+      lt.is_paid
+    FROM leave_requests lr
+    JOIN users u ON lr.user_id = u.id
+    JOIN leave_types lt ON lr.leave_type_id = lt.id
+    WHERE lr.id = $1
+  `;
+  const { rows } = await pool.query(query, [id]);
+  return rows[0];
 };
 
 export const deleteLeave = async (id) => {

@@ -92,6 +92,7 @@ export const getAllOvertime = async (userId, roleId) => {
       -- Join User Info
       u.fullname,
       u.email,
+      u.profile_picture, -- <--- Added this line
       (SELECT string_agg(substring(n from 1 for 1), '') 
        FROM regexp_split_to_table(u.fullname, '\s+') as n) as initials
 

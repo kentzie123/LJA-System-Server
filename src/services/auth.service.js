@@ -1,10 +1,13 @@
 import pool from "../config/db.js";
 
 export const registerUser = async (userData) => {
-  const { fullname, email, password, role_id, payrate, position, branch } = userData;
+  const { fullname, email, password, role_id, payrate, position, branch } =
+    userData;
 
   // 1. Check if user exists
-  const userCheck = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
+  const userCheck = await pool.query("SELECT * FROM users WHERE email = $1", [
+    email,
+  ]);
   if (userCheck.rows.length > 0) {
     throw new Error("User already exists!");
   }
@@ -12,7 +15,7 @@ export const registerUser = async (userData) => {
   // 2. Insert User
   const result = await pool.query(
     "INSERT INTO users (fullname, email, password, role_id, payrate, position, branch) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, fullname, email, role_id",
-    [fullname, email, password, role_id, payrate, position, branch]
+    [fullname, email, password, role_id, payrate, position, branch],
   );
 
   return result.rows[0];
@@ -43,11 +46,21 @@ export const loginUser = async (email, password) => {
       r.perm_overtime_view,
       r.perm_overtime_view_all,
       r.perm_overtime_approve,
-      r.perm_overtime_create, -- NEW
-      r.perm_overtime_manage, -- NEW
+      r.perm_overtime_create,
+      r.perm_overtime_manage,
+      -- Deduction
+      r.perm_deduction_view,
+      r.perm_deduction_manage,
+      -- Allowance (NEW)
+      r.perm_allowance_view,
+      r.perm_allowance_manage,
+      -- Dashboard
+      r.perm_dashboard_view,
       -- Payroll
       r.perm_payroll_view,
+      r.perm_payroll_view_all,
       r.perm_payroll_manage,
+      r.perm_payroll_approve,
       -- Role Management
       r.perm_role_view,
       r.perm_role_manage
@@ -55,7 +68,7 @@ export const loginUser = async (email, password) => {
     LEFT JOIN roles r ON u.role_id = r.id 
     WHERE u.email = $1
   `;
-  
+
   const result = await pool.query(query, [email]);
 
   if (result.rows.length === 0) throw new Error("Invalid Credentials");
@@ -90,11 +103,21 @@ export const loginUser = async (email, password) => {
     perm_overtime_view: user.perm_overtime_view,
     perm_overtime_view_all: user.perm_overtime_view_all,
     perm_overtime_approve: user.perm_overtime_approve,
-    perm_overtime_create: user.perm_overtime_create, // NEW
-    perm_overtime_manage: user.perm_overtime_manage, // NEW
+    perm_overtime_create: user.perm_overtime_create,
+    perm_overtime_manage: user.perm_overtime_manage,
+    // Deduction
+    perm_deduction_view: user.perm_deduction_view,
+    perm_deduction_manage: user.perm_deduction_manage,
+    // Allowance (NEW)
+    perm_allowance_view: user.perm_allowance_view,
+    perm_allowance_manage: user.perm_allowance_manage,
+    // Dashboard
+    perm_dashboard_view: user.perm_dashboard_view,
     // Payroll
     perm_payroll_view: user.perm_payroll_view,
+    perm_payroll_view_all: user.perm_payroll_view_all,
     perm_payroll_manage: user.perm_payroll_manage,
+    perm_payroll_approve: user.perm_payroll_approve,
     // Role Management
     perm_role_view: user.perm_role_view,
     perm_role_manage: user.perm_role_manage,
@@ -117,15 +140,22 @@ export const getUserById = async (userId) => {
       r.perm_leave_create, r.perm_leave_manage,
       -- Overtime
       r.perm_overtime_view, r.perm_overtime_view_all, r.perm_overtime_approve,
-      r.perm_overtime_create, r.perm_overtime_manage, -- NEW
+      r.perm_overtime_create, r.perm_overtime_manage,
+      -- Deduction
+      r.perm_deduction_view, r.perm_deduction_manage,
+      -- Allowance (NEW)
+      r.perm_allowance_view, r.perm_allowance_manage,
+      -- Dashboard
+      r.perm_dashboard_view,
       -- Payroll
-      r.perm_payroll_view, r.perm_payroll_manage,
+      r.perm_payroll_view, r.perm_payroll_view_all, 
+      r.perm_payroll_manage, r.perm_payroll_approve,
       -- Role Management
       r.perm_role_view, r.perm_role_manage
       FROM users u
       LEFT JOIN roles r ON u.role_id = r.id
       WHERE u.id = $1`,
-    [userId]
+    [userId],
   );
 
   if (result.rows.length === 0) throw new Error("User not found");
@@ -135,10 +165,12 @@ export const getUserById = async (userId) => {
   user.role = {
     id: user.role_id,
     name: user.role_name,
+    // Employee
     perm_employee_view: user.perm_employee_view,
     perm_employee_create: user.perm_employee_create,
     perm_employee_edit: user.perm_employee_edit,
     perm_employee_delete: user.perm_employee_delete,
+    // Attendance
     perm_attendance_view: user.perm_attendance_view,
     perm_attendance_verify: user.perm_attendance_verify,
     perm_attendance_manual: user.perm_attendance_manual,
@@ -153,11 +185,21 @@ export const getUserById = async (userId) => {
     perm_overtime_view: user.perm_overtime_view,
     perm_overtime_view_all: user.perm_overtime_view_all,
     perm_overtime_approve: user.perm_overtime_approve,
-    perm_overtime_create: user.perm_overtime_create, // NEW
-    perm_overtime_manage: user.perm_overtime_manage, // NEW
+    perm_overtime_create: user.perm_overtime_create,
+    perm_overtime_manage: user.perm_overtime_manage,
+    // Deduction
+    perm_deduction_view: user.perm_deduction_view,
+    perm_deduction_manage: user.perm_deduction_manage,
+    // Allowance (NEW)
+    perm_allowance_view: user.perm_allowance_view,
+    perm_allowance_manage: user.perm_allowance_manage,
+    // Dashboard
+    perm_dashboard_view: user.perm_dashboard_view,
     // Payroll
     perm_payroll_view: user.perm_payroll_view,
+    perm_payroll_view_all: user.perm_payroll_view_all,
     perm_payroll_manage: user.perm_payroll_manage,
+    perm_payroll_approve: user.perm_payroll_approve,
     // Role Management
     perm_role_view: user.perm_role_view,
     perm_role_manage: user.perm_role_manage,
