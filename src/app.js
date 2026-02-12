@@ -17,7 +17,7 @@ import deductionRoutes from "./routes/deduction.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import allowanceRoutes from "./routes/allowance.routes.js";
 
-const allowedOrigins = ["http://localhost:3000"];
+const allowedOrigins = ["http://localhost:3000", "http://192.168.1.54:3000"];
 
 export const app = express();
 const server = http.createServer(app);
