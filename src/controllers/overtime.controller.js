@@ -31,7 +31,14 @@ export const getAllOvertime = async (req, res) => {
   try {
     const userId = req.user.userId;
     const roleId = req.user.role_id;
-    const records = await OvertimeService.getAllOvertime(userId, roleId);
+    
+    // Grab the filters from the URL
+    const { status, month, year, targetUserId, startDate, endDate } = req.query;
+
+    const records = await OvertimeService.getAllOvertime(userId, roleId, {
+      status, month, year, targetUserId, startDate, endDate
+    });
+    
     res.status(200).json(records);
   } catch (error) {
     console.error("Fetch Overtime Error:", error);
@@ -43,7 +50,11 @@ export const getOvertimeStats = async (req, res) => {
   try {
     const userId = req.user.userId;
     const roleId = req.user.role_id;
-    const stats = await OvertimeService.getOvertimeStats(userId, roleId);
+    
+    // Extract dynamic filters from the request URL
+    const { month, year } = req.query;
+
+    const stats = await OvertimeService.getOvertimeStats(userId, roleId, { month, year });
     res.status(200).json(stats);
   } catch (error) {
     console.error("Fetch Stats Error:", error);

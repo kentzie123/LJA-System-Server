@@ -31,7 +31,17 @@ export const getAllLeaves = async (req, res) => {
   try {
     const userId = req.user.userId;
     const roleId = req.user.role_id;
-    const leaves = await LeaveService.getAllLeaves(userId, roleId);
+    
+    // Extract dynamic filters from the request URL
+    const { status, month, year, targetUserId } = req.query;
+
+    const leaves = await LeaveService.getAllLeaves(userId, roleId, {
+      status,
+      month,
+      year,
+      targetUserId
+    });
+    
     res.status(200).json(leaves);
   } catch (error) {
     console.error("Fetch Leaves Error:", error);
@@ -52,7 +62,11 @@ export const getLeaveStats = async (req, res) => {
   try {
     const userId = req.user.userId;
     const roleId = req.user.role_id;
-    const stats = await LeaveService.getLeaveStats(userId, roleId);
+    
+    // Extract dynamic filters from the request URL
+    const { month, year } = req.query;
+
+    const stats = await LeaveService.getLeaveStats(userId, roleId, { month, year });
     res.status(200).json(stats);
   } catch (error) {
     console.error("Fetch Leave Stats Error:", error);
@@ -223,5 +237,20 @@ export const updateLeaveRequest = async (req, res) => {
     res.status(200).json({ message: "Request updated", data: full });
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+export const getAllEmployeeBalances = async (req, res) => {
+  try {
+    const roleId = req.user.role_id;
+    if (roleId !== 1 && roleId !== 3) {
+      return res.status(403).json({ message: "Unauthorized. Admin access required." });
+    }
+
+    const allBalances = await LeaveService.getAllEmployeeBalances();
+    res.status(200).json(allBalances);
+  } catch (error) {
+    console.error("Fetch All Balances Error:", error);
+    res.status(500).json({ message: "Failed to fetch all employee balances." });
   }
 };

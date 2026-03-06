@@ -76,6 +76,7 @@ export const createLeaveRequest = async (data) => {
   }
 };
 
+
 // 2. ADMIN CREATE REQUEST (For Specific Employee, Auto-Approved)
 export const createAdminLeaveRequest = async (data) => {
   const { targetUserId, leaveTypeId, startDate, endDate, reason } = data;
@@ -154,7 +155,9 @@ export const createAdminLeaveRequest = async (data) => {
   }
 };
 
-export const getAllLeaves = async (userId, roleId) => {
+export const getAllLeaves = async (userId, roleId, filters = {}) => {
+  const { status, month, year, targetUserId } = filters;
+  
   let query = `
     SELECT 
       lr.id,
@@ -168,29 +171,140 @@ export const getAllLeaves = async (userId, roleId) => {
       lr.rejection_reason,
       u.fullname,
       u.email,
-      u.profile_picture,  -- <--- Added this line
+      u.profile_picture,
       (SELECT string_agg(substring(n from 1 for 1), '') 
-       FROM regexp_split_to_table(u.fullname, '\s+') as n) as initials,
+       FROM regexp_split_to_table(u.fullname, '\\s+') as n) as initials,
       lt.name AS leave_type,
       lt.color_code,
       lt.is_paid
     FROM leave_requests lr
     JOIN users u ON lr.user_id = u.id
     JOIN leave_types lt ON lr.leave_type_id = lt.id
+    WHERE 1=1 
   `;
 
   const params = [];
+  let paramIndex = 1;
 
-  // Assuming roleId 2 is "Employee/Staff"
+  // 1. Role / User Restriction
   if (roleId === 2) {
-    query += ` WHERE lr.user_id = $1`;
+    // Standard employee can only see their own
+    query += ` AND lr.user_id = $${paramIndex}`;
     params.push(userId);
+    paramIndex++;
+  } else if (targetUserId) {
+    // Admin filtering for a specific employee
+    query += ` AND lr.user_id = $${paramIndex}`;
+    params.push(targetUserId);
+    paramIndex++;
+  }
+
+  // 2. Status Filter
+  if (status && status !== "All") {
+    query += ` AND lr.status = $${paramIndex}`;
+    params.push(status);
+    paramIndex++;
+  }
+
+ // 3. Month & Year Filter (Overlap Logic)
+  if (month && year) {
+    const startOfMonth = `${year}-${month.toString().padStart(2, '0')}-01`;
+    
+    query += ` AND lr.start_date <= ($${paramIndex}::date + INTERVAL '1 month' - INTERVAL '1 day')`;
+    params.push(startOfMonth);
+    paramIndex++;
+    
+    // Check if leave ENDS after the start of the month
+    query += ` AND lr.end_date >= $${paramIndex}::date`;
+    params.push(startOfMonth);
+    paramIndex++;
+  }
+
+  // 4. Exact Date Range Filter (Used for DTR Exports)
+  if (filters.startDate && filters.endDate) {
+    query += ` AND lr.start_date <= $${paramIndex}::date`;
+    params.push(filters.endDate);
+    paramIndex++;
+    
+    query += ` AND lr.end_date >= $${paramIndex}::date`;
+    params.push(filters.startDate);
+    paramIndex++;
   }
 
   query += ` ORDER BY lr.created_at DESC`;
 
   const result = await pool.query(query, params);
   return result.rows;
+};
+
+export const getLeaveStats = async (userId, roleId, filters = {}) => {
+  const isAdmin = roleId === 1 || roleId === 3;
+  const client = await pool.connect();
+  const { month, year } = filters;
+
+  try {
+    const stats = {};
+
+    // Dynamic Query Builder to handle parameters safely
+    const buildQuery = (baseCondition) => {
+       let query = `SELECT COUNT(*) FROM leave_requests WHERE ${baseCondition}`;
+       const params = [];
+       let idx = 1;
+
+       if (!isAdmin) {
+          query += ` AND user_id = $${idx}`;
+          params.push(userId);
+          idx++;
+       }
+
+       // Apply month/year overlap filter if provided
+       if (month && year) {
+          const startOfMonth = `${year}-${month.toString().padStart(2, '0')}-01`;
+          query += ` AND start_date <= ($${idx}::date + INTERVAL '1 month' - INTERVAL '1 day') AND end_date >= $${idx}::date`;
+          params.push(startOfMonth);
+       }
+
+       return { query, params };
+    };
+
+    // 1. PENDING (Selected Month)
+    const q1 = buildQuery("status = 'Pending'");
+    const pendingRes = await client.query(q1.query, q1.params);
+    stats.pendingCount = parseInt(pendingRes.rows[0].count);
+
+    // 2. APPROVED (Selected Month)
+    const q2 = buildQuery("status = 'Approved'");
+    const approvedRes = await client.query(q2.query, q2.params);
+    stats.approvedCountMonth = parseInt(approvedRes.rows[0].count);
+
+    // 3. REJECTED (Selected Month)
+    const q3 = buildQuery("status = 'Rejected'");
+    const rejectedRes = await client.query(q3.query, q3.params);
+    stats.rejectedCount = parseInt(rejectedRes.rows[0].count);
+
+    // 4. CUSTOM ROLE STAT
+    if (isAdmin) {
+       // ADMIN: Count distinct employees on leave this month
+       let activeQuery = `SELECT COUNT(DISTINCT user_id) FROM leave_requests WHERE status = 'Approved'`;
+       let activeParams = [];
+       if (month && year) {
+          const startOfMonth = `${year}-${month.toString().padStart(2, '0')}-01`;
+          activeQuery += ` AND start_date <= ($1::date + INTERVAL '1 month' - INTERVAL '1 day') AND end_date >= $1::date`;
+          activeParams.push(startOfMonth);
+       }
+       const activeRes = await client.query(activeQuery, activeParams);
+       stats.activeOnLeave = parseInt(activeRes.rows[0].count);
+    } else {
+       // EMPLOYEE: Total Approved All Time (Balances are annual, so all-time is fine here)
+       const totalRes = await client.query(`SELECT COUNT(*) FROM leave_requests WHERE user_id = $1 AND status = 'Approved'`, [userId]);
+       stats.totalApprovedCount = parseInt(totalRes.rows[0].count);
+    }
+
+    return stats;
+
+  } finally {
+    client.release();
+  }
 };
 
 export const getUserBalances = async (userId) => {
@@ -338,78 +452,22 @@ export const updateLeaveStatus = async (id, status, rejectionReason = null) => {
   }
 };
 
-export const getLeaveStats = async (userId, roleId) => {
-  const isAdmin = roleId === 1 || roleId === 3;
-  const client = await pool.connect();
+export const getAllEmployeeBalances = async () => {
+  const result = await pool.query(`
+    SELECT 
+      u.id as user_id, 
+      u.fullname, 
+      u.profile_picture,
+      lt.name as leave_name,
+      elb.allocated_days,
+      elb.used_days
+    FROM users u
+    CROSS JOIN leave_types lt
+    LEFT JOIN employee_leave_balances elb ON u.id = elb.user_id AND lt.id = elb.leave_type_id
+    WHERE u.role_id != 3 -- Excludes Super Admin
+    AND elb.year = EXTRACT(YEAR FROM CURRENT_DATE)
+    ORDER BY u.fullname ASC
+  `);
   
-  try {
-    const stats = {};
-
-    // --- SHARED QUERY PARTS ---
-    // If not admin, restrict all counts to the specific user_id
-    const userFilter = isAdmin ? "" : `WHERE user_id = $1`;
-    const params = isAdmin ? [] : [userId];
-
-    // 1. TOTAL PENDING (Admin: All Pending | Staff: My Pending)
-    const pendingQuery = isAdmin 
-      ? `SELECT COUNT(*) FROM leave_requests WHERE status = 'Pending'`
-      : `SELECT COUNT(*) FROM leave_requests WHERE user_id = $1 AND status = 'Pending'`;
-    
-    const pendingRes = await client.query(pendingQuery, params);
-    stats.pendingCount = parseInt(pendingRes.rows[0].count);
-
-    // 2. APPROVED REQUESTS (This Month)
-    // Counts how many leave requests start in the current month
-    const approvedQuery = isAdmin
-      ? `SELECT COUNT(*) 
-         FROM leave_requests 
-         WHERE status = 'Approved' 
-         AND EXTRACT(MONTH FROM start_date) = EXTRACT(MONTH FROM CURRENT_DATE)
-         AND EXTRACT(YEAR FROM start_date) = EXTRACT(YEAR FROM CURRENT_DATE)`
-      : `SELECT COUNT(*) 
-         FROM leave_requests 
-         WHERE user_id = $1 
-         AND status = 'Approved' 
-         AND EXTRACT(MONTH FROM start_date) = EXTRACT(MONTH FROM CURRENT_DATE)
-         AND EXTRACT(YEAR FROM start_date) = EXTRACT(YEAR FROM CURRENT_DATE)`;
-
-    const approvedRes = await client.query(approvedQuery, params);
-    stats.approvedCountMonth = parseInt(approvedRes.rows[0].count);
-
-    // 3. REJECTED REQUESTS (This Month)
-    const rejectedQuery = isAdmin
-      ? `SELECT COUNT(*) FROM leave_requests 
-         WHERE status = 'Rejected'
-         AND EXTRACT(MONTH FROM start_date) = EXTRACT(MONTH FROM CURRENT_DATE)`
-      : `SELECT COUNT(*) FROM leave_requests 
-         WHERE user_id = $1 
-         AND status = 'Rejected'
-         AND EXTRACT(MONTH FROM start_date) = EXTRACT(MONTH FROM CURRENT_DATE)`;
-
-    const rejectedRes = await client.query(rejectedQuery, params);
-    stats.rejectedCount = parseInt(rejectedRes.rows[0].count);
-
-    // 4. ROLE SPECIFIC STAT
-    if (isAdmin) {
-      // ADMIN: Count distinct employees on leave this month
-      const activeRes = await client.query(
-        `SELECT COUNT(DISTINCT user_id) FROM leave_requests 
-         WHERE status = 'Approved'
-         AND EXTRACT(MONTH FROM start_date) = EXTRACT(MONTH FROM CURRENT_DATE)`
-      );
-      stats.activeOnLeave = parseInt(activeRes.rows[0].count);
-    } else {
-      // EMPLOYEE: Their Total Approved Requests (All Time)
-      const totalApprovedRes = await client.query(
-        `SELECT COUNT(*) FROM leave_requests WHERE user_id = $1 AND status = 'Approved'`,
-        [userId]
-      );
-      stats.totalApprovedCount = parseInt(totalApprovedRes.rows[0].count);
-    }
-
-    return stats;
-
-  } finally {
-    client.release();
-  }
+  return result.rows;
 };

@@ -48,6 +48,7 @@ export const deleteUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
+    
     const updatedUser = await userService.editUser(id, req.body);
 
     res.status(200).json({
@@ -66,13 +67,12 @@ export const updateUser = async (req, res) => {
 export const uploadProfilePicture = async (req, res) => {
   try {
     const { userId: id } = req.user;
-    const { image } = req.body; // Expecting the Base64 string here
+    const { image } = req.body; 
 
     if (!image) {
       return res.status(400).json({ error: "No image data provided" });
     }
 
-    // Call service to update the TEXT column with the Base64 string
     const updatedUser = await userService.updateProfilePicture(id, image);
 
     res.status(200).json({
@@ -92,7 +92,6 @@ export const updatePersonalProfile = async (req, res) => {
   try {
     const { userId: id } = req.user;
     
-
     const updatedUser = await userService.updateUserProfile(id, req.body);
 
     res.status(200).json({
@@ -104,10 +103,23 @@ export const updatePersonalProfile = async (req, res) => {
     if (err.message === "User not found") {
       return res.status(404).json({ error: err.message });
     }
-    // Handle unique email constraint error if they try to use an taken email
     if (err.code === "23505") {
       return res.status(400).json({ error: "Email already in use" });
     }
     res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+export const fetchUserByEmployeeId = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await userService.getUserByEmployeeId(id);
+    res.status(200).json(user);
+  } catch (err) {
+    console.error(err);
+    if (err.message === "User not found") {
+      return res.status(404).json({ error: err.message });
+    }
+    res.status(500).json({ error: "Failed to fetch user profile" });
   }
 };

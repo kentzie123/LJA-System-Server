@@ -11,7 +11,6 @@ export const requireRole = (...allowedRoles) => {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       req.user = decoded;
-      console.log(decoded);
       
 
       if (!allowedRoles.includes(decoded.role_id)) {

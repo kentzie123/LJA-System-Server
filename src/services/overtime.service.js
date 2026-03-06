@@ -70,7 +70,9 @@ export const createAdminOvertimeRequest = async (data) => {
 };
 
 // 4. Get All Overtime Requests
-export const getAllOvertime = async (userId, roleId) => {
+export const getAllOvertime = async (userId, roleId, filters = {}) => {
+  const { status, month, year, targetUserId, startDate, endDate } = filters;
+
   let query = `
     SELECT 
       ot.id,
@@ -92,21 +94,59 @@ export const getAllOvertime = async (userId, roleId) => {
       -- Join User Info
       u.fullname,
       u.email,
-      u.profile_picture, -- <--- Added this line
+      u.profile_picture,
       (SELECT string_agg(substring(n from 1 for 1), '') 
-       FROM regexp_split_to_table(u.fullname, '\s+') as n) as initials
+       FROM regexp_split_to_table(u.fullname, '\\s+') as n) as initials
 
     FROM overtime_requests ot
     JOIN users u ON ot.user_id = u.id
     LEFT JOIN overtime_types ott ON ot.ot_type_id = ott.id
+    WHERE 1=1 
   `;
 
   const params = [];
+  let paramIndex = 1;
 
-  // Filter: If not Admin (1 or 3), only show own requests
+  // 1. Role / User Filter
   if (roleId !== 1 && roleId !== 3) {
-    query += ` WHERE ot.user_id = $1`;
+    // Standard employee: only see their own
+    query += ` AND ot.user_id = $${paramIndex}`;
     params.push(userId);
+    paramIndex++;
+  } else if (targetUserId) {
+    // Admin checking a specific user
+    query += ` AND ot.user_id = $${paramIndex}`;
+    params.push(targetUserId);
+    paramIndex++;
+  }
+
+  // 2. Status Filter
+  if (status && status !== "All") {
+    query += ` AND ot.status = $${paramIndex}`;
+    params.push(status);
+    paramIndex++;
+  }
+
+  // 3. Month & Year Filter (Overtime is usually a single day, so exact match is fine)
+  if (month && year) {
+    query += ` AND EXTRACT(MONTH FROM ot.ot_date) = $${paramIndex}`;
+    params.push(month);
+    paramIndex++;
+    
+    query += ` AND EXTRACT(YEAR FROM ot.ot_date) = $${paramIndex}`;
+    params.push(year);
+    paramIndex++;
+  }
+
+  // 4. Exact Date Range Filter (For DTR Export)
+  if (startDate && endDate) {
+    query += ` AND ot.ot_date >= $${paramIndex}::date`;
+    params.push(startDate);
+    paramIndex++;
+    
+    query += ` AND ot.ot_date <= $${paramIndex}::date`;
+    params.push(endDate);
+    paramIndex++;
   }
 
   query += ` ORDER BY ot.created_at DESC`;
@@ -159,67 +199,65 @@ export const updateOvertimeStatus = async (id, status, rejectionReason) => {
 };
 
 
-export const getOvertimeStats = async (userId, roleId) => {
+export const getOvertimeStats = async (userId, roleId, filters = {}) => {
   const isAdmin = roleId === 1 || roleId === 3;
   const client = await pool.connect();
-  
+  const { month, year } = filters;
+
   try {
     const stats = {};
 
-    // --- SHARED QUERY PARTS ---
-    // If not admin, restrict all counts to the specific user_id
-    const userFilter = isAdmin ? "" : `WHERE user_id = $1`;
-    const params = isAdmin ? [] : [userId];
+    // Dynamic Query Builder for Stats
+    const buildQuery = (selectPart, baseCondition) => {
+      let query = `SELECT ${selectPart} FROM overtime_requests WHERE ${baseCondition}`;
+      const params = [];
+      let idx = 1;
 
-    // 1. TOTAL PENDING (Admin: All Pending Reviews | Staff: My Pending Requests)
-    // Note: We use WHERE or AND depending on if userFilter is empty or not
-    const pendingQuery = isAdmin 
-      ? `SELECT COUNT(*) FROM overtime_requests WHERE status = 'Pending'`
-      : `SELECT COUNT(*) FROM overtime_requests WHERE user_id = $1 AND status = 'Pending'`;
-    
-    const pendingRes = await client.query(pendingQuery, params);
+      if (!isAdmin) {
+        query += ` AND user_id = $${idx}`;
+        params.push(userId);
+        idx++;
+      }
+
+      if (month && year) {
+        query += ` AND EXTRACT(MONTH FROM ot_date) = $${idx}`;
+        params.push(month);
+        idx++;
+        query += ` AND EXTRACT(YEAR FROM ot_date) = $${idx}`;
+        params.push(year);
+        idx++;
+      }
+      return { query, params };
+    };
+
+    // 1. PENDING (Selected Month)
+    const q1 = buildQuery("COUNT(*)", "status = 'Pending'");
+    const pendingRes = await client.query(q1.query, q1.params);
     stats.pendingCount = parseInt(pendingRes.rows[0].count);
 
-    // 2. TOTAL HOURS APPROVED (This Month)
-    const hoursQuery = isAdmin
-      ? `SELECT COALESCE(SUM(total_hours), 0) as total 
-         FROM overtime_requests 
-         WHERE status = 'Approved' 
-         AND EXTRACT(MONTH FROM ot_date) = EXTRACT(MONTH FROM CURRENT_DATE)
-         AND EXTRACT(YEAR FROM ot_date) = EXTRACT(YEAR FROM CURRENT_DATE)`
-      : `SELECT COALESCE(SUM(total_hours), 0) as total 
-         FROM overtime_requests 
-         WHERE user_id = $1 
-         AND status = 'Approved' 
-         AND EXTRACT(MONTH FROM ot_date) = EXTRACT(MONTH FROM CURRENT_DATE)
-         AND EXTRACT(YEAR FROM ot_date) = EXTRACT(YEAR FROM CURRENT_DATE)`;
-
-    const hoursRes = await client.query(hoursQuery, params);
+    // 2. TOTAL HOURS APPROVED (Selected Month)
+    const q2 = buildQuery("COALESCE(SUM(total_hours), 0) as total", "status = 'Approved'");
+    const hoursRes = await client.query(q2.query, q2.params);
     stats.approvedHoursMonth = parseFloat(hoursRes.rows[0].total).toFixed(1);
 
-    // 3. REJECTED REQUESTS (This Month)
-    const rejectedQuery = isAdmin
-      ? `SELECT COUNT(*) FROM overtime_requests 
-         WHERE status = 'Rejected'
-         AND EXTRACT(MONTH FROM ot_date) = EXTRACT(MONTH FROM CURRENT_DATE)`
-      : `SELECT COUNT(*) FROM overtime_requests 
-         WHERE user_id = $1 
-         AND status = 'Rejected'
-         AND EXTRACT(MONTH FROM ot_date) = EXTRACT(MONTH FROM CURRENT_DATE)`;
-
-    const rejectedRes = await client.query(rejectedQuery, params);
+    // 3. REJECTED REQUESTS (Selected Month)
+    const q3 = buildQuery("COUNT(*)", "status = 'Rejected'");
+    const rejectedRes = await client.query(q3.query, q3.params);
     stats.rejectedCount = parseInt(rejectedRes.rows[0].count);
 
     // 4. ROLE SPECIFIC STAT
     if (isAdmin) {
-      // ADMIN: Count distinct employees who requested OT this month
-      const activeRes = await client.query(
-        `SELECT COUNT(DISTINCT user_id) FROM overtime_requests 
-         WHERE EXTRACT(MONTH FROM ot_date) = EXTRACT(MONTH FROM CURRENT_DATE)`
-      );
+      // ADMIN: Active requesters this month
+      let activeQuery = `SELECT COUNT(DISTINCT user_id) FROM overtime_requests WHERE 1=1`;
+      let activeParams = [];
+      if (month && year) {
+        activeQuery += ` AND EXTRACT(MONTH FROM ot_date) = $1 AND EXTRACT(YEAR FROM ot_date) = $2`;
+        activeParams = [month, year];
+      }
+      const activeRes = await client.query(activeQuery, activeParams);
       stats.activeRequesters = parseInt(activeRes.rows[0].count);
     } else {
-      // EMPLOYEE: Their Total Approved Requests (All Time)
+      // EMPLOYEE: All-time approved count
       const approvedCountRes = await client.query(
         `SELECT COUNT(*) FROM overtime_requests WHERE user_id = $1 AND status = 'Approved'`,
         [userId]

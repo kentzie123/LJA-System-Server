@@ -89,8 +89,7 @@ const DeductionService = {
           json_agg(
             json_build_object(
               'user_id', u.id, 
-              'fullname', u.fullname, 
-              'profile_picture', u.profile_picture,
+              'fullname', u.fullname,
               'position', u.position,
               'loan_total', ds.total_loan_amount,
               'loan_paid', ds.paid_loan_amount
@@ -111,6 +110,7 @@ const DeductionService = {
       ORDER BY dp.created_at DESC
     `;
     const result = await pool.query(query);
+    
     return result.rows;
   },
 

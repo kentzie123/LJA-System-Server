@@ -5,7 +5,8 @@ import {
   deleteUser,
   updateUser,
   uploadProfilePicture,
-  updatePersonalProfile
+  updatePersonalProfile,
+  fetchUserByEmployeeId,
 } from "../controllers/user.controller.js";
 
 // Import the new middleware from the file you just created
@@ -16,41 +17,44 @@ const router = express.Router();
 // --- ADMIN / HR MANAGEMENT ROUTES (Protected by Permissions) ---
 
 // 1. View Employee List
-// Checks if the user's role has 'perm_employee_view' = true
 router.get(
-  "/fetch-all", 
-  verifyToken, 
-  checkPermission("perm_employee_view"), 
-  fetchAllUsers
+  "/fetch-all",
+  verifyToken,
+  checkPermission("perm_employee_view"),
+  fetchAllUsers,
+);
+
+// View Single Employee Details
+router.get(
+  "/fetch-user/:id",
+  verifyToken,
+  checkPermission("perm_employee_view"),
+  fetchUserByEmployeeId,
 );
 
 // 2. Create New Employee
-// Checks for 'perm_employee_create'
 router.post(
-  "/create-user", 
-  verifyToken, 
-  checkPermission("perm_employee_create"), 
-  createUser
+  "/create-user",
+  verifyToken,
+  checkPermission("perm_employee_create"),
+  createUser,
 );
 
 // 3. Delete Employee
-// Checks for 'perm_employee_delete'
 router.delete(
-  "/delete-user/:id", 
-  verifyToken, 
-  checkPermission("perm_employee_delete"), 
-  deleteUser
+  "/delete-user/:id",
+  verifyToken,
+  checkPermission("perm_employee_delete"),
+  deleteUser,
 );
 
 // 4. Update Employee Details (Admin Edit)
-// Checks for 'perm_employee_edit'
 router.put(
-  "/update-user/:id", 
-  verifyToken, 
-  checkPermission("perm_employee_edit"), 
-  updateUser
+  "/update-user/:id",
+  verifyToken,
+  checkPermission("perm_employee_edit"),
+  updateUser,
 );
-
 
 // --- PERSONAL PROFILE ROUTES (Available to ALL logged-in users) ---
 
