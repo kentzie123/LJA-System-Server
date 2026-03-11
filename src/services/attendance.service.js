@@ -1,5 +1,5 @@
 import pool from "../config/db.js";
-import { saveBase64Image } from "../utils/fileUtils.js"; // <-- NEW IMPORT
+import { saveBase64Image, deleteLocalFile } from "../utils/fileUtils.js"; // <-- NEW IMPORT
 
 // ==========================================
 // HELPER: THE PAYROLL MATH (Only affects worked_hours)
@@ -163,7 +163,13 @@ export const deleteAttendance = async (id) => {
     throw new Error("Attendance record not found.");
   }
 
-  return result.rows[0];
+  const deletedRecord = result.rows[0];
+
+  // --- NEW: Shred the physical files from the hard drive ---
+  if (deletedRecord.photo_in) await deleteLocalFile(deletedRecord.photo_in);
+  if (deletedRecord.photo_out) await deleteLocalFile(deletedRecord.photo_out);
+
+  return deletedRecord;
 };
 
 // ==========================================

@@ -1,6 +1,6 @@
 import pool from "../config/db.js";
 
-import { saveBase64Image } from "../utils/fileUtils.js";
+import { saveBase64Image, deleteLocalFile } from "../utils/fileUtils.js";
 
 // 1. Fetch All Users
 export const getAllUsers = async () => {
@@ -15,7 +15,7 @@ export const getAllUsers = async () => {
       u.branch, 
       u."isActive", 
       u.created_at,
-      COALESCE(u.profile_picture, '/images/default_profile.jpg') AS profile_picture,
+      u.profile_picture,
       u.daily_rate,
       u.date_of_birth, 
       u.place_of_birth, 
@@ -184,19 +184,30 @@ export const deleteUser = async (id) => {
   return result.rows[0];
 };
 
-// 5. Update Profile Picture
+// ==========================================
+// 5. UPDATE PROFILE PICTURE
+// ==========================================
 export const updateProfilePicture = async (id, base64Image) => {
-  const photoUrl = await saveBase64Image(base64Image, id, "profile");
+  // 1. Find the user's current (old) photo before we overwrite it
+  const userCheck = await pool.query("SELECT profile_picture FROM users WHERE id = $1", [id]);
+  if (userCheck.rows.length === 0) throw new Error("User not found");
+  
+  const oldPhotoUrl = userCheck.rows[0].profile_picture;
 
-  // Save the tiny URL into PostgreSQL instead of the massive string
+  // 2. Save the brand new photo to the hard drive
+  const newPhotoUrl = await saveBase64Image(base64Image, id, "profile");
+
+  // 3. Update the database to point to the new photo
   const result = await pool.query(
     `UPDATE users SET profile_picture = $1 WHERE id = $2 RETURNING id, profile_picture`,
-    [photoUrl, id],
+    [newPhotoUrl, id],
   );
 
-  if (result.rows.length === 0) {
-    throw new Error("User not found");
+  // 4. Shred the old photo (only if it was a local file, not a default avatar URL)
+  if (oldPhotoUrl) {
+    await deleteLocalFile(oldPhotoUrl);
   }
+
   return result.rows[0];
 };
 

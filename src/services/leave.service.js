@@ -172,6 +172,7 @@ export const getAllLeaves = async (userId, roleId, filters = {}) => {
       u.fullname,
       u.email,
       u.profile_picture,
+      u.position,
       (SELECT string_agg(substring(n from 1 for 1), '') 
        FROM regexp_split_to_table(u.fullname, '\\s+') as n) as initials,
       lt.name AS leave_type,
