@@ -1,21 +1,30 @@
 import * as OvertimeService from "../services/overtime.service.js";
 
 // ==========================================
+// HELPER: ROLE CHECK
+// ==========================================
+const isAdminRole = (roleId) => roleId === 1 || roleId === 3;
+
+// ==========================================
 // HELPER: CENTRALIZED OVERTIME SOCKET EMITTER
 // ==========================================
 const emitOvertimeUpdate = (req, type, otData) => {
+  if (!req?.io) return;
+
   const payload = { type, data: otData };
 
-  // 1. Notify Admins (For Team Approvals tab and badges)
+  // Notify admins
   req.io.to("admin_room").emit("overtime_update", payload);
 
-  // 2. Notify the Specific Employee (For their personal history)
-  if (otData && otData.user_id) {
+  // Notify specific employee
+  if (otData?.user_id) {
     req.io.to(`user_${otData.user_id}`).emit("overtime_update", payload);
   }
 };
 
-// --- READ / VIEW ONLY ---
+// ==========================================
+// READ / VIEW ONLY
+// ==========================================
 
 export const getOvertimeTypes = async (req, res) => {
   try {
@@ -29,16 +38,26 @@ export const getOvertimeTypes = async (req, res) => {
 
 export const getAllOvertime = async (req, res) => {
   try {
-    const userId = req.user.userId;
-    const roleId = req.user.role_id;
-    
-    // Grab the filters from the URL
-    const { status, month, year, targetUserId, startDate, endDate } = req.query;
+    const { userId, role_id } = req.user;
 
-    const records = await OvertimeService.getAllOvertime(userId, roleId, {
-      status, month, year, targetUserId, startDate, endDate
+    const {
+      status,
+      month,
+      year,
+      targetUserId,
+      startDate,
+      endDate,
+    } = req.query;
+
+    const records = await OvertimeService.getAllOvertime(userId, role_id, {
+      status,
+      month,
+      year,
+      targetUserId,
+      startDate,
+      endDate,
     });
-    
+
     res.status(200).json(records);
   } catch (error) {
     console.error("Fetch Overtime Error:", error);
@@ -48,13 +67,14 @@ export const getAllOvertime = async (req, res) => {
 
 export const getOvertimeStats = async (req, res) => {
   try {
-    const userId = req.user.userId;
-    const roleId = req.user.role_id;
-    
-    // Extract dynamic filters from the request URL
+    const { userId, role_id } = req.user;
     const { month, year } = req.query;
 
-    const stats = await OvertimeService.getOvertimeStats(userId, roleId, { month, year });
+    const stats = await OvertimeService.getOvertimeStats(userId, role_id, {
+      month,
+      year,
+    });
+
     res.status(200).json(stats);
   } catch (error) {
     console.error("Fetch Stats Error:", error);
@@ -62,32 +82,29 @@ export const getOvertimeStats = async (req, res) => {
   }
 };
 
-// --- ACTIONS WITH REAL-TIME EMISSIONS ---
+// ==========================================
+// CREATE REQUEST (EMPLOYEE)
+// ==========================================
 
-// POST /api/overtime/create (Standard Employee Request)
 export const createOvertimeRequest = async (req, res) => {
   try {
-    const { date, startTime, endTime, reason, otTypeId } = req.body;
+    const { startAt, endAt, reason, otTypeId } = req.body;
     const userId = req.user.userId;
 
-    if (!date || !startTime || !endTime || !reason || !otTypeId) {
+    if (!startAt || !endAt || !reason || !otTypeId) {
       return res.status(400).json({ message: "All fields are required." });
     }
 
-    // 1. Create Record
     const newRequest = await OvertimeService.createOvertimeRequest({
       userId,
-      date,
-      startTime,
-      endTime,
+      startAt,
+      endAt,
       reason,
       otTypeId,
     });
 
-    // 2. Fetch Full Data (for socket payload)
     const fullRecord = await OvertimeService.getOvertimeById(newRequest.id);
 
-    // 3. Emit Event
     emitOvertimeUpdate(req, "NEW_REQUEST", fullRecord);
 
     res.status(201).json({
@@ -100,37 +117,28 @@ export const createOvertimeRequest = async (req, res) => {
   }
 };
 
-// POST /api/overtime/create-admin (Admin Assign Overtime)
+// ==========================================
+// CREATE REQUEST (ADMIN ASSIGN)
+// ==========================================
+
 export const createAdminOvertimeRequest = async (req, res) => {
   try {
-    const { targetUserId, date, startTime, endTime, reason, otTypeId } =
-      req.body;
+    const { targetUserId, startAt, endAt, reason, otTypeId } = req.body;
 
-    if (
-      !targetUserId ||
-      !date ||
-      !startTime ||
-      !endTime ||
-      !reason ||
-      !otTypeId
-    ) {
+    if (!targetUserId || !startAt || !endAt || !reason || !otTypeId) {
       return res.status(400).json({ message: "All fields are required." });
     }
 
-    // 1. Create Record
     const newRequest = await OvertimeService.createAdminOvertimeRequest({
       targetUserId,
-      date,
-      startTime,
-      endTime,
+      startAt,
+      endAt,
       reason,
       otTypeId,
     });
 
-    // 2. Fetch Full Data
     const fullRecord = await OvertimeService.getOvertimeById(newRequest.id);
 
-    // 3. Emit Event (Notifies employee "Admin assigned OT")
     emitOvertimeUpdate(req, "ADMIN_ASSIGNED", fullRecord);
 
     res.status(201).json({
@@ -143,17 +151,23 @@ export const createAdminOvertimeRequest = async (req, res) => {
   }
 };
 
-// DELETE /api/overtime/:id
-export const deleteOvertimeRequest = async (req, res) => {
+// ==========================================
+// DELETE REQUEST
+// ==========================================
+
+export const deleteOvertimeRequest = async (req, res) => {;
+  
   try {
     const { id } = req.params;
-    const roleId = req.user.role_id;
-    const userId = req.user.userId;
+    const { role_id, userId } = req.user;
 
     const request = await OvertimeService.getOvertimeById(id);
-    if (!request) return res.status(404).json({ message: "Request not found" });
 
-    const isAdmin = roleId === 1 || roleId === 3;
+    if (!request) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+
+    const isAdmin = isAdminRole(role_id);
     const isOwner = request.user_id === userId;
 
     if (!isAdmin && !isOwner) {
@@ -166,10 +180,8 @@ export const deleteOvertimeRequest = async (req, res) => {
         .json({ message: "You can only delete Pending requests." });
     }
 
-    // 1. Delete
     await OvertimeService.deleteOvertime(id);
 
-    // 2. Emit Event (Pass the request object so we know who to notify)
     emitOvertimeUpdate(req, "DELETE", request);
 
     res.status(200).json({ message: "Request deleted successfully" });
@@ -179,18 +191,24 @@ export const deleteOvertimeRequest = async (req, res) => {
   }
 };
 
-// PUT /api/overtime/:id/update (Edit Details)
+// ==========================================
+// UPDATE REQUEST DETAILS
+// ==========================================
+
 export const updateOvertimeRequest = async (req, res) => {
   try {
     const { id } = req.params;
     const data = req.body;
-    const roleId = req.user.role_id;
-    const userId = req.user.userId;
+
+    const { role_id, userId } = req.user;
 
     const request = await OvertimeService.getOvertimeById(id);
-    if (!request) return res.status(404).json({ message: "Request not found" });
 
-    const isAdmin = roleId === 1 || roleId === 3;
+    if (!request) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+
+    const isAdmin = isAdminRole(role_id);
 
     if (!isAdmin && request.user_id !== userId) {
       return res.status(403).json({ message: "Unauthorized action." });
@@ -202,38 +220,45 @@ export const updateOvertimeRequest = async (req, res) => {
         .json({ message: "You can only edit Pending requests." });
     }
 
-    // 1. Update
     const updated = await OvertimeService.updateOvertime(id, data);
 
-    // 2. Fetch Full Data
     const fullRecord = await OvertimeService.getOvertimeById(updated.id);
 
-    // 3. Emit Event
     emitOvertimeUpdate(req, "UPDATE", fullRecord);
 
-    res.status(200).json({ message: "Request updated", data: fullRecord });
+    res.status(200).json({
+      message: "Request updated",
+      data: fullRecord,
+    });
   } catch (error) {
     console.error("Update Overtime Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
 
-// PUT /api/overtime/:id/status (Approve/Reject)
+// ==========================================
+// APPROVE / REJECT REQUEST
+// ==========================================
+
 export const updateOvertimeStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const { status, rejectionReason } = req.body;
 
-    // 1. Update Status
+    if (!status) {
+      return res.status(400).json({ message: "Status is required." });
+    }
+
     await OvertimeService.updateOvertimeStatus(id, status, rejectionReason);
 
-    // 2. Fetch Full Data
     const fullRecord = await OvertimeService.getOvertimeById(id);
 
-    // 3. Emit Event (Notifies employee "Approved/Rejected")
     emitOvertimeUpdate(req, "STATUS_UPDATE", fullRecord);
 
-    res.status(200).json({ message: `Request ${status}`, data: fullRecord });
+    res.status(200).json({
+      message: `Request ${status}`,
+      data: fullRecord,
+    });
   } catch (error) {
     console.error("Update Status Error:", error);
     res.status(500).json({ message: "Internal server error" });

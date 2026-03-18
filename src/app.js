@@ -18,6 +18,7 @@ import payrollRoutes from "./routes/payroll.routes.js";
 import deductionRoutes from "./routes/deduction.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 import allowanceRoutes from "./routes/allowance.routes.js";
+import eventRoutes from "./routes/event.routes.js";
 
 const allowedOrigins = [
   "http://localhost:3000",
@@ -75,6 +76,8 @@ app.use("/api/payroll", payrollRoutes);
 app.use("/api/deductions", deductionRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/allowance", allowanceRoutes);
+app.use("/api/events", eventRoutes);
+
 
 app.get("/api/status", (req, res) => {
   res.json({

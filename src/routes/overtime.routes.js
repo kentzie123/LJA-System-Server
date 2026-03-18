@@ -2,7 +2,7 @@ import express from "express";
 import {
   getOvertimeTypes,
   getAllOvertime,
-  getOvertimeStats, // Import the new controller
+  getOvertimeStats,
   createOvertimeRequest,
   createAdminOvertimeRequest,
   deleteOvertimeRequest,
@@ -10,53 +10,76 @@ import {
   updateOvertimeStatus,
 } from "../controllers/overtime.controller.js";
 
-// Import your custom middleware
 import { verifyToken, checkPermission } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// 1. All routes require valid login
+// ========================================
+// GLOBAL AUTH
+// ========================================
 router.use(verifyToken);
 
-// --- OPEN ROUTES (Common Data) ---
+// ========================================
+// COMMON DATA
+// ========================================
 router.get("/types", getOvertimeTypes);
 
-// --- STATS ROUTE (New) ---
-// We use 'perm_overtime_view' as the base permission to see the dashboard
+// ========================================
+// DASHBOARD STATS
+// ========================================
 router.get(
-  "/stats", 
-  checkPermission("perm_overtime_view"), 
+  "/stats",
+  checkPermission("perm_overtime_view"),
   getOvertimeStats
 );
 
-// --- STANDARD EMPLOYEE ACTIONS ---
+// ========================================
+// EMPLOYEE ROUTES
+// ========================================
 
+// Create OT request
 router.post(
-  "/create", 
-  checkPermission("perm_overtime_create"), 
+  "/create",
+  checkPermission("perm_overtime_create"),
   createOvertimeRequest
 );
 
+// View overtime
 router.get(
-  "/all", 
-  checkPermission("perm_overtime_view"), 
+  "/all",
+  checkPermission("perm_overtime_view"),
   getAllOvertime
 );
 
-router.delete("/:id", deleteOvertimeRequest);
-router.put("/:id/update", updateOvertimeRequest);
+// Update request
+router.put(
+  "/:id/update",
+  verifyToken,
+  updateOvertimeRequest
+);
 
-// --- ADMIN / HR ACTIONS ---
+// Delete request
+router.delete(
+  "/:id",
+  verifyToken,
+  deleteOvertimeRequest
+);
 
+// ========================================
+// ADMIN / HR ROUTES
+// ========================================
+
+// Assign overtime
 router.post(
   "/create-admin",
   checkPermission("perm_overtime_manage"),
   createAdminOvertimeRequest
 );
 
+// Approve / Reject
 router.put(
-  "/:id/status", 
-  checkPermission("perm_overtime_approve"), 
+  "/:id/status",
+  checkPermission("perm_overtime_approve"),
   updateOvertimeStatus
 );
 

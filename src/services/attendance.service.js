@@ -1,5 +1,5 @@
 import pool from "../config/db.js";
-import { saveBase64Image, deleteLocalFile } from "../utils/fileUtils.js"; // <-- NEW IMPORT
+import { saveBase64Image, deleteLocalFile } from "../utils/fileUtils.js";
 
 // ==========================================
 // HELPER: THE PAYROLL MATH (Only affects worked_hours)
@@ -464,8 +464,16 @@ export const adminClockOverride = async (data) => {
 // 10. CALENDAR DATA
 // ==========================================
 export const getCalendarData = async (userId, year, month) => {
-  const startDate = new Date(year, month, 1).toLocaleDateString('en-CA');
-  const endDate = new Date(year, month + 1, 0).toLocaleDateString('en-CA');
+  // 1. Safely parse the inputs to integers
+  const y = parseInt(year);
+  const m = parseInt(month); // 0-indexed (March = 2)
+  
+  // 2. BULLETPROOF DATE FORMATTING
+  const formattedMonth = String(m + 1).padStart(2, '0');
+  const lastDay = new Date(y, m + 1, 0).getDate();
+  
+  const startDate = `${y}-${formattedMonth}-01`;
+  const endDate = `${y}-${formattedMonth}-${lastDay}`;
 
   const attendancesQuery = `
     SELECT * FROM attendance 
@@ -478,7 +486,7 @@ export const getCalendarData = async (userId, year, month) => {
     FROM leave_requests lr
     LEFT JOIN leave_types lt ON lr.leave_type_id = lt.id
     WHERE lr.user_id = $1 
-    AND lr.status = 'Approved'
+    AND LOWER(lr.status) = 'approved'
     AND (
       (lr.start_date BETWEEN $2 AND $3) OR 
       (lr.end_date BETWEEN $2 AND $3) OR
@@ -492,8 +500,8 @@ export const getCalendarData = async (userId, year, month) => {
     FROM overtime_requests req
     LEFT JOIN overtime_types ot ON req.ot_type_id = ot.id
     WHERE req.user_id = $1 
-    AND req.status = 'Approved'
-    AND req.ot_date BETWEEN $2 AND $3
+    AND LOWER(req.status) = 'approved'
+    AND CAST(req.start_datetime AS DATE) BETWEEN $2 AND $3
   `;
   const overtimeResult = await pool.query(overtimeQuery, [userId, startDate, endDate]);
 

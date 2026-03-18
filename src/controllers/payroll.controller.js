@@ -1,12 +1,13 @@
 import PayrollService from "../services/payroll.service.js";
 
+// 1. GET ALL PAY RUNS (Filtered by permission)
 export const getAllPayRuns = async (req, res) => {
   try {
     const userId = req.user.userId;
-    // Check their exact database permission securely
+    // Check if user has permission to see Drafts
     const canManage = await PayrollService.checkManagePermission(userId);
     
-    // Service will automatically hide Drafts if canManage is false
+    // Service returns all if canManage is true, only Approved if false
     const runs = await PayrollService.getAllPayRuns(canManage);
     res.status(200).json(runs);
   } catch (error) {
@@ -15,27 +16,44 @@ export const getAllPayRuns = async (req, res) => {
   }
 };
 
+// 2. CREATE NEW PAY RUN (Draft)
 export const createPayRun = async (req, res) => {
   try {
+    const userId = req.user.userId;
     const { run_name, start_date, end_date, pay_date } = req.body;
+
+    // Security Check
+    const canManage = await PayrollService.checkManagePermission(userId);
+    if (!canManage) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to create pay runs." });
+    }
 
     if (!start_date || !end_date || !pay_date) {
       return res.status(400).json({ message: "Missing required dates." });
     }
 
     const newPayRun = await PayrollService.createPayRun({ run_name, start_date, end_date, pay_date });
-    res.status(201).json({ message: "Pay run created successfully as Draft", data: newPayRun });
+    res.status(201).json({ message: "Pay run generated successfully as Draft", data: newPayRun });
   } catch (error) {
     console.error("Create PayRun Error:", error);
     res.status(500).json({ message: "Failed to create pay run." });
   }
 };
 
+// 3. APPROVE PAY RUN (Finalize and Move to Ledger)
 export const approvePayRun = async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user.userId;
+
+    // Security Check
+    const canManage = await PayrollService.checkManagePermission(userId);
+    if (!canManage) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to approve payroll." });
+    }
+
     await PayrollService.approvePayRun(id);
-    res.status(200).json({ message: "Pay run approved successfully" });
+    res.status(200).json({ message: "Pay run approved and ledger updated successfully" });
   } catch (error) {
     console.error("Approve PayRun Error:", error);
     if (error.message === "Pay Run not found" || error.message === "Pay Run is already approved") {
@@ -45,9 +63,18 @@ export const approvePayRun = async (req, res) => {
   }
 };
 
+// 4. DELETE PAY RUN
 export const deletePayRun = async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user.userId;
+
+    // Security Check
+    const canManage = await PayrollService.checkManagePermission(userId);
+    if (!canManage) {
+      return res.status(403).json({ message: "Forbidden: You do not have permission to delete pay runs." });
+    }
+
     await PayrollService.deletePayRun(id);
     res.status(200).json({ message: "Pay run deleted successfully" });
   } catch (error) {
@@ -59,12 +86,15 @@ export const deletePayRun = async (req, res) => {
   }
 };
 
+// 5. GET PAY RUN DETAILS (Records of everyone in that run)
 export const getPayRunDetails = async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.userId;
 
     const canManage = await PayrollService.checkManagePermission(userId);
+    console.log(canManage);
+    
     const data = await PayrollService.getPayRunDetails(id, canManage);
     
     res.status(200).json(data);
@@ -80,8 +110,16 @@ export const getPayRunDetails = async (req, res) => {
   }
 };
 
+// 6. GET ALL RECORDS (History across all approved runs)
 export const getAllRecords = async (req, res) => {
   try {
+    const userId = req.user.userId;
+    const canManage = await PayrollService.checkManagePermission(userId);
+    
+    if (!canManage) {
+      return res.status(403).json({ message: "Forbidden: Unauthorized access to all records." });
+    }
+
     const records = await PayrollService.getAllPayrollRecords();
     res.status(200).json(records);
   } catch (error) {
@@ -90,6 +128,7 @@ export const getAllRecords = async (req, res) => {
   }
 };
 
+// 7. GET MY RECORDS (Personal Payslips only)
 export const getMyRecords = async (req, res) => {
   try {
     const userId = req.user.userId; 

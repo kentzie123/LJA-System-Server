@@ -6,32 +6,33 @@ import {
   getPayRunDetails,
   getAllRecords,
   getMyRecords,
-  approvePayRun // <-- Imported this
+  approvePayRun,
 } from "../controllers/payroll.controller.js";
 
-// Import the new unified middleware
 import { verifyToken, checkPermission } from "../middleware/authMiddleware.js";
 
 const router = Router();
 
-// 1. All routes require a valid login token first
 router.use(verifyToken);
 
 // ==========================================
 // VIEW / READ ROUTES
 // ==========================================
 
+// Managers see Drafts/All; Employees see only Approved list
 router.get("/", checkPermission("perm_payroll_view"), getAllPayRuns);
 
+// Strictly for the logged-in user's own history
 router.get("/history/my", checkPermission("perm_payroll_view"), getMyRecords);
 
+// Admin-only view for the entire company history
 router.get(
   "/history/all",
   checkPermission("perm_payroll_view_all"),
   getAllRecords,
 );
 
-router.get("/:id", checkPermission("perm_payroll_view"), getPayRunDetails);
+router.get("/:id", getPayRunDetails);
 
 // ==========================================
 // MANAGEMENT ROUTES (HR / ADMIN)
@@ -41,11 +42,11 @@ router.post("/create", checkPermission("perm_payroll_manage"), createPayRun);
 
 router.delete("/:id", checkPermission("perm_payroll_manage"), deletePayRun);
 
-// NEW: Approve Pay Run / Mark as Finalized
+// Finalizing the run and pushing to ledger
 router.put(
   "/:id/approve",
   checkPermission("perm_payroll_approve"),
-  approvePayRun
+  approvePayRun,
 );
 
 export default router;

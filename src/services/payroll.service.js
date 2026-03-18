@@ -2,7 +2,7 @@ import pool from "../config/db.js";
 
 const PayrollService = {
   // ==========================================
-  // 1. CREATE PAY RUN (Generates as DRAFT)
+  // 1. CREATE PAY RUN (Draft)
   // ==========================================
   createPayRun: async ({ run_name, start_date, end_date, pay_date }) => {
     const client = await pool.connect();
@@ -10,66 +10,204 @@ const PayrollService = {
     try {
       await client.query("BEGIN");
 
-      // A. Create Pay Run Record as 'Draft'
       const runRes = await client.query(
         `INSERT INTO pay_runs (run_name, start_date, end_date, pay_date, status) 
          VALUES ($1, $2, $3, $4, 'Draft') RETURNING id`,
-        [run_name, start_date, end_date, pay_date],
+        [run_name, start_date, end_date, pay_date]
       );
       const payRunId = runRes.rows[0].id;
 
-      // B. Get All Active Employees (EXCLUDING Admin & Super Admin)
-      const usersRes = await client.query(
-        `SELECT id, fullname, daily_rate FROM users 
-         WHERE "isActive" = true 
-         AND role_id NOT IN (1, 3)`,
+      const eventsRes = await client.query(
+        `SELECT start_date, event_type FROM company_events 
+         WHERE is_payroll_holiday = true AND start_date BETWEEN $1 AND $2`,
+        [start_date, end_date]
       );
+      const companyEvents = eventsRes.rows;
 
-      // C. THE MAIN CALCULATION LOOP
+      const usersRes = await client.query(`
+        SELECT 
+          u.id, u.fullname, u.pay_type, u.payrate, u.daily_rate, u.working_days_factor,
+          (
+            SELECT json_agg(
+              json_build_object('day_of_week', ws.day_of_week, 'is_rest_day', ws.is_rest_day)
+            )
+            FROM work_schedules ws WHERE ws.user_id = u.id
+          ) as schedules
+        FROM users u 
+        WHERE u."isActive" = true AND u.role_id NOT IN (1, 3)
+      `);
+
       for (const user of usersRes.rows) {
-        const hourlyRate = PayrollService.calculateHourlyRate(user.daily_rate);
-        const attendance = await PayrollService.getAttendanceStats(client, user.id, start_date, end_date);
-        const leaveStats = await PayrollService.getPaidLeaveStats(client, user.id, start_date, end_date);
+        // Updated to capture both exact terminology
+        const isFixRate = ["Monthly", "Fixrate", "Fixed"].includes(user.pay_type);
 
-        const totalPaidHours = attendance.total_worked_hours + leaveStats.hours;
-        const basicPay = totalPaidHours * hourlyRate;
-        const lateDeductionAmount = parseFloat((attendance.total_late_hours * hourlyRate).toFixed(2));
+        const DRE = isFixRate
+          ? (parseFloat(user.payrate || 0) * 12) / (user.working_days_factor || 261)
+          : parseFloat(user.daily_rate || 0);
 
-        const overtimeData = await PayrollService.calculateOvertime(client, user.id, start_date, end_date, hourlyRate);
-        const totalOvertime = overtimeData.total_amount;
+        const hourlyRate = DRE / 8;
+
+        const expectedWorkingDays = PayrollService.getExpectedWorkingDays(
+          start_date,
+          end_date,
+          user.schedules
+        );
+
+        const holidayStats = PayrollService.calculateUserHolidays(
+          companyEvents,
+          user.schedules
+        );
+
+        const attendance = await PayrollService.getAttendanceStats(
+          client,
+          user.id,
+          start_date,
+          end_date
+        );
+
+        const leaveStats = await PayrollService.getPaidLeaveStats(
+          client,
+          user.id,
+          start_date,
+          end_date
+        );
+
+        const lateDeductionAmount = parseFloat(
+          (attendance.total_late_hours * hourlyRate).toFixed(2)
+        );
+
+        const earningsBreakdown = [];
+        const generatedDeductions = []; // Holds Lates and Absents for clear UI separation
+        
+        let grossBasicPay = 0;
+        let absentDeduction = 0;
+
+        if (isFixRate) {
+          const semiMonthlyBase = parseFloat(user.payrate || 0) / 2;
+          grossBasicPay = semiMonthlyBase;
+
+          earningsBreakdown.push({
+            label: "Basic Salary",
+            amount: semiMonthlyBase,
+            type: "base",
+          });
+
+          const validNonWorkingDays =
+            leaveStats.days +
+            holidayStats.regularCount +
+            holidayStats.specialCount;
+
+          const daysMissed = Math.max(
+            0,
+            expectedWorkingDays - attendance.days_present - validNonWorkingDays
+          );
+
+          absentDeduction = parseFloat((daysMissed * DRE).toFixed(2));
+
+          if (absentDeduction > 0) {
+            generatedDeductions.push({
+              name: "Absent Deduction",
+              amount: absentDeduction,
+              units: `${daysMissed} day(s) × ₱${DRE.toFixed(2)}`,
+            });
+          }
+
+          if (lateDeductionAmount > 0) {
+            generatedDeductions.push({
+              name: "Late Penalty",
+              amount: lateDeductionAmount,
+              units: `${attendance.total_late_hours} hr(s) × ₱${hourlyRate.toFixed(2)}/hr`,
+            });
+          }
+        } else {
+          // Daily Rate Logic
+          const totalPaidHours = attendance.total_worked_hours + leaveStats.hours;
+          grossBasicPay = totalPaidHours * hourlyRate;
+
+          earningsBreakdown.push({
+            label: "Basic Salary",
+            amount: parseFloat(grossBasicPay.toFixed(2)),
+            units: `${totalPaidHours.toFixed(2)} hrs × ₱${hourlyRate.toFixed(2)}/hr`,
+            type: "base",
+          });
+
+          if (holidayStats.regularCount > 0) {
+            const regularHolidayPay = holidayStats.regularCount * DRE;
+            grossBasicPay += regularHolidayPay;
+            earningsBreakdown.push({
+              label: "Regular Holiday Pay",
+              amount: parseFloat(regularHolidayPay.toFixed(2)),
+              units: `${holidayStats.regularCount} day(s) × ₱${DRE.toFixed(2)}`,
+            });
+          }
+
+          if (lateDeductionAmount > 0) {
+            generatedDeductions.push({
+              name: "Late Penalty",
+              amount: lateDeductionAmount,
+              units: `${attendance.total_late_hours} hr(s) × ₱${hourlyRate.toFixed(2)}/hr`,
+            });
+          }
+        }
+
+        grossBasicPay = parseFloat(grossBasicPay.toFixed(2));
+
+        const overtimeData = await PayrollService.calculateOvertime(
+          client,
+          user.id,
+          start_date,
+          end_date,
+          hourlyRate
+        );
 
         const allowanceData = await PayrollService.calculateAllowances(client, user.id);
-        const totalAllowances = allowanceData.total_amount;
+        const deductionData = await PayrollService.calculateDeductions(client, user.id, grossBasicPay);
 
-        const deductionData = await PayrollService.calculateDeductions(client, user.id, basicPay);
-        const totalDeductions = deductionData.total_amount;
+        // Merge Absents/Lates with standard Plan/Loan Deductions
+        const combinedDeductions = [...generatedDeductions, ...deductionData.breakdown];
+        const totalDeductionsAmount = parseFloat(
+          (generatedDeductions.reduce((sum, d) => sum + d.amount, 0) + deductionData.total_amount).toFixed(2)
+        );
 
-        const netPay = basicPay + totalOvertime + totalAllowances - totalDeductions;
+        const totalEarnings = grossBasicPay + overtimeData.total_amount + allowanceData.total_amount;
+        const netPay = parseFloat((totalEarnings - totalDeductionsAmount).toFixed(2));
 
         const detailsPayload = {
+          pay_type: user.pay_type,
           attendance_summary: {
+            expected_working_days: expectedWorkingDays,
             days_present: attendance.days_present,
             total_worked_hours: attendance.total_worked_hours,
             total_late_hours: attendance.total_late_hours,
-            late_deduction_amount: lateDeductionAmount, 
+            late_deduction_amount: lateDeductionAmount,
+            absent_deduction: absentDeduction,
             paid_leave_days: leaveStats.days,
-            paid_leave_hours: leaveStats.hours,
-            hourly_rate: hourlyRate, 
+            regular_holidays: holidayStats.regularCount,
+            special_holidays: holidayStats.specialCount,
+            hourly_rate: parseFloat(hourlyRate.toFixed(2)),
+            daily_rate_equiv: parseFloat(DRE.toFixed(2)),
+            regular_holiday_pay: isFixRate ? 0 : holidayStats.regularCount * DRE,
           },
+          earnings_breakdown: earningsBreakdown,
           overtime_breakdown: overtimeData.breakdown,
           allowance_breakdown: allowanceData.breakdown,
-          deduction_breakdown: deductionData.breakdown,
+          deduction_breakdown: combinedDeductions, // Now cleanly houses ALL negative impacts
         };
 
-        // Save the Payroll Record as 'Draft' (no ledger inserts yet)
         await client.query(
           `INSERT INTO payroll_records 
-            (pay_run_id, user_id, basic_salary, overtime_pay, allowances, deductions, net_pay, details, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Draft')`,
+           (pay_run_id, user_id, basic_salary, overtime_pay, allowances, deductions, net_pay, details, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Draft')`,
           [
-            payRunId, user.id, basicPay, totalOvertime,
-            totalAllowances, totalDeductions, netPay, JSON.stringify(detailsPayload),
-          ],
+            payRunId,
+            user.id,
+            grossBasicPay, // Now represents true Gross Base before Absents/Lates
+            overtimeData.total_amount,
+            allowanceData.total_amount,
+            totalDeductionsAmount,
+            netPay,
+            JSON.stringify(detailsPayload),
+          ]
         );
       }
 
@@ -89,25 +227,40 @@ const PayrollService = {
   // ==========================================
   approvePayRun: async (payRunId) => {
     const client = await pool.connect();
-
     try {
       await client.query("BEGIN");
 
-      const runCheck = await client.query(`SELECT status FROM pay_runs WHERE id = $1`, [payRunId]);
+      const runCheck = await client.query(
+        `SELECT status FROM pay_runs WHERE id = $1`,
+        [payRunId]
+      );
       if (runCheck.rows.length === 0) throw new Error("Pay Run not found");
-      if (runCheck.rows[0].status === 'Approved') throw new Error("Pay Run is already approved");
+      if (runCheck.rows[0].status === "Approved")
+        throw new Error("Pay Run is already approved");
 
-      await client.query(`UPDATE pay_runs SET status = 'Approved' WHERE id = $1`, [payRunId]);
-      await client.query(`UPDATE payroll_records SET status = 'Approved' WHERE pay_run_id = $1`, [payRunId]);
+      await client.query(
+        `UPDATE pay_runs SET status = 'Approved' WHERE id = $1`,
+        [payRunId]
+      );
+      await client.query(
+        `UPDATE payroll_records SET status = 'Approved' WHERE pay_run_id = $1`,
+        [payRunId]
+      );
 
-      const records = await client.query(`SELECT user_id, details FROM payroll_records WHERE pay_run_id = $1`, [payRunId]);
+      const records = await client.query(
+        `SELECT user_id, details FROM payroll_records WHERE pay_run_id = $1`,
+        [payRunId]
+      );
 
-      // Extract deductions from JSON and push to ledger
       for (const record of records.rows) {
-        const details = typeof record.details === 'string' ? JSON.parse(record.details) : record.details;
+        const details =
+          typeof record.details === "string"
+            ? JSON.parse(record.details)
+            : record.details;
         const deductions = details.deduction_breakdown || [];
-        
+
         for (const item of deductions) {
+          // Only insert to ledger if it has a plan_id (ignores generated Absents/Lates)
           if (item.plan_id && item.amount > 0) {
             await client.query(
               `INSERT INTO deduction_ledger (pay_run_id, deduction_plan_id, user_id, amount_paid)
@@ -133,22 +286,6 @@ const PayrollService = {
   // 3. HELPER FUNCTIONS
   // ==========================================
 
-  checkManagePermission: async (userId) => {
-    const result = await pool.query(`
-      SELECT r.perm_payroll_manage 
-      FROM users u 
-      JOIN roles r ON u.role_id = r.id 
-      WHERE u.id = $1
-    `, [userId]);
-    return result.rows[0]?.perm_payroll_manage || false;
-  },
-
-  calculateHourlyRate: (dailyRateStr) => {
-    const dailyRate = parseFloat(dailyRateStr || 0);
-    if (dailyRate === 0) return 0;
-    return dailyRate / 8;
-  },
-
   getAttendanceStats: async (client, userId, startDate, endDate) => {
     const query = `
       SELECT 
@@ -163,17 +300,59 @@ const PayrollService = {
         ), 0) as total_late_hours
       FROM attendance
       WHERE user_id = $1
-        AND date BETWEEN $2 AND $3
-        AND status_in = 'Verified'
-        AND status_out = 'Verified'
+        AND date BETWEEN $2::date AND $3::date
+        AND status_in IN ('Verified', 'Pending')
+        AND status_out IN ('Verified', 'Pending')
     `;
     const result = await client.query(query, [userId, startDate, endDate]);
     const row = result.rows[0];
     return {
       total_worked_hours: parseFloat(row.total_worked_hours || 0),
       days_present: parseInt(row.days_present || 0),
-      total_late_hours: parseFloat(parseFloat(row.total_late_hours || 0).toFixed(2)),
+      total_late_hours: parseFloat(
+        parseFloat(row.total_late_hours || 0).toFixed(2)
+      ),
     };
+  },
+
+  getExpectedWorkingDays: (start, end, schedules) => {
+    const restDays = schedules
+      ? schedules.filter((s) => s.is_rest_day).map((s) => s.day_of_week)
+      : [0, 6];
+
+    let count = 0;
+    let cur = new Date(start + "T00:00:00");
+    const stop = new Date(end + "T00:00:00");
+
+    while (cur <= stop) {
+      if (!restDays.includes(cur.getDay())) count++;
+      cur.setDate(cur.getDate() + 1);
+    }
+    return count;
+  },
+
+  calculateUserHolidays: (events, schedules) => {
+    let regularCount = 0;
+    let specialCount = 0;
+
+    const restDays = schedules
+      ? schedules.filter((s) => s.is_rest_day).map((s) => s.day_of_week)
+      : [0, 6];
+
+    events.forEach((h) => {
+      const day = new Date(h.start_date).getDay();
+      const eventType = h.event_type || "";
+
+      if (!restDays.includes(day)) {
+        if (eventType === "Regular Holiday") {
+          regularCount++;
+        } else if (eventType === "Special Non-Working") {
+          specialCount++;
+        }
+      }
+    });
+
+    return { regularCount, specialCount, totalValidHolidays: regularCount + specialCount };
   },
 
   getPaidLeaveStats: async (client, userId, startDate, endDate) => {
@@ -192,16 +371,18 @@ const PayrollService = {
     `;
     const result = await client.query(query, [userId, startDate, endDate]);
     const days = parseInt(result.rows[0].total_leave_days || 0);
-    return { days: days, hours: days * 8 };
+    return { days, hours: days * 8 };
   },
 
   calculateOvertime: async (client, userId, startDate, endDate, hourlyRate) => {
     const query = `
-    SELECT ot.ot_date, ot.total_hours, ott.name as type_name, ott.rate as multiplier
-    FROM overtime_requests ot
-    JOIN overtime_types ott ON ot.ot_type_id = ott.id
-    WHERE ot.user_id = $1 AND ot.ot_date BETWEEN $2 AND $3 AND ot.status = 'Approved'
-  `;
+      SELECT CAST(ot.start_datetime AS DATE) as ot_date, ot.total_hours, ott.name as type_name, ott.rate as multiplier
+      FROM overtime_requests ot
+      JOIN overtime_types ott ON ot.ot_type_id = ott.id
+      WHERE ot.user_id = $1 
+        AND CAST(ot.start_datetime AS DATE) BETWEEN $2 AND $3 
+        AND LOWER(ot.status) = 'approved'
+    `;
     const result = await client.query(query, [userId, startDate, endDate]);
     let totalAmount = 0;
     const breakdown = [];
@@ -212,11 +393,14 @@ const PayrollService = {
       const cost = hourlyRate * multiplier * hours;
       totalAmount += cost;
       breakdown.push({
-        date: record.ot_date, type: record.type_name,
-        hours: hours, multiplier: multiplier, amount: parseFloat(cost.toFixed(2)),
+        date: record.ot_date, // This uses the newly casted date string
+        type: record.type_name,
+        hours: hours,
+        multiplier: multiplier,
+        amount: parseFloat(cost.toFixed(2)),
       });
     }
-    return { total_amount: totalAmount, breakdown: breakdown };
+    return { total_amount: totalAmount, breakdown };
   },
 
   calculateAllowances: async (client, userId) => {
@@ -233,10 +417,14 @@ const PayrollService = {
       const amount = parseFloat(row.final_amount);
       if (amount > 0) {
         totalAllowance += amount;
-        breakdown.push({ id: row.type_id, name: row.name, amount: parseFloat(amount.toFixed(2)) });
+        breakdown.push({
+          id: row.type_id,
+          name: row.name,
+          amount: parseFloat(amount.toFixed(2)),
+        });
       }
     }
-    return { total_amount: totalAllowance, breakdown: breakdown };
+    return { total_amount: totalAllowance, breakdown };
   },
 
   calculateDeductions: async (client, userId, basicPay) => {
@@ -252,9 +440,10 @@ const PayrollService = {
     const result = await client.query(query, [userId]);
 
     for (const plan of result.rows) {
-      let deductionAmount = plan.deduction_type === "PERCENTAGE" 
-        ? basicPay * (parseFloat(plan.plan_amount) / 100) 
-        : parseFloat(plan.plan_amount);
+      let deductionAmount =
+        plan.deduction_type === "PERCENTAGE"
+          ? basicPay * (parseFloat(plan.plan_amount) / 100)
+          : parseFloat(plan.plan_amount);
 
       const totalLoan = parseFloat(plan.total_loan_amount || 0);
       if (totalLoan > 0) {
@@ -267,12 +456,14 @@ const PayrollService = {
         deductionAmount = parseFloat(deductionAmount.toFixed(2));
         totalDeduction += deductionAmount;
         breakdown.push({
-          plan_id: plan.plan_id, name: plan.name,
-          amount: deductionAmount, is_global: plan.is_global,
+          plan_id: plan.plan_id,
+          name: plan.name,
+          amount: deductionAmount,
+          is_global: plan.is_global,
         });
       }
     }
-    return { total_amount: totalDeduction, breakdown: breakdown };
+    return { total_amount: totalDeduction, breakdown };
   },
 
   // ==========================================
@@ -284,8 +475,7 @@ const PayrollService = {
     const [runRes] = await Promise.all([pool.query(runQuery, [id])]);
 
     if (runRes.rows.length === 0) throw new Error("Pay Run not found");
-
-    if (runRes.rows[0].status === 'Draft' && !canManage) {
+    if (runRes.rows[0].status === "Draft" && !canManage) {
       throw new Error("Unauthorized: This pay run is still a draft.");
     }
 
@@ -321,7 +511,6 @@ const PayrollService = {
 
   getAllPayRuns: async (canManage) => {
     const statusFilter = canManage ? "" : "WHERE pr.status = 'Approved'";
-
     const result = await pool.query(`
       SELECT pr.*, 
       (SELECT COUNT(*) FROM payroll_records WHERE pay_run_id = pr.id) as employee_count,
@@ -367,6 +556,19 @@ const PayrollService = {
     const result = await pool.query(query, [id]);
     if (result.rowCount === 0) throw new Error("Pay Run not found");
     return result.rows[0];
+  },
+
+  checkManagePermission: async (userId) => {
+    const result = await pool.query(
+      `
+      SELECT r.perm_payroll_manage 
+      FROM users u 
+      JOIN roles r ON u.role_id = r.id 
+      WHERE u.id = $1
+      `,
+      [userId]
+    );
+    return result.rows[0]?.perm_payroll_manage || false;
   },
 };
 

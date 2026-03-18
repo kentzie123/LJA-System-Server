@@ -61,7 +61,7 @@ export const updateRole = async (id, permissions) => {
     // Deduction
     perm_deduction_view,
     perm_deduction_manage,
-    // Allowance (NEW)
+    // Allowance
     perm_allowance_view,
     perm_allowance_manage,
     // Dashboard
@@ -74,6 +74,9 @@ export const updateRole = async (id, permissions) => {
     // Roles
     perm_role_view,
     perm_role_manage,
+    // Events (NEW)
+    perm_event_view,
+    perm_event_manage,
   } = permissions;
 
   const result = await pool.query(
@@ -90,8 +93,9 @@ export const updateRole = async (id, permissions) => {
         perm_dashboard_view = $23,
         perm_payroll_view = $24, perm_payroll_view_all = $25, 
         perm_payroll_manage = $26, perm_payroll_approve = $27,
-        perm_role_view = $28, perm_role_manage = $29
-      WHERE id = $30
+        perm_role_view = $28, perm_role_manage = $29,
+        perm_event_view = $30, perm_event_manage = $31
+      WHERE id = $32
       RETURNING *`,
     [
       // Employee (1-4)
@@ -119,7 +123,7 @@ export const updateRole = async (id, permissions) => {
       // Deduction (19-20)
       perm_deduction_view,
       perm_deduction_manage,
-      // Allowance (21-22) - NEW
+      // Allowance (21-22)
       perm_allowance_view,
       perm_allowance_manage,
       // Dashboard (23)
@@ -132,7 +136,10 @@ export const updateRole = async (id, permissions) => {
       // Roles (28-29)
       perm_role_view,
       perm_role_manage,
-      // ID (30)
+      // Events (30-31)
+      perm_event_view,
+      perm_event_manage,
+      // ID (32)
       id,
     ],
   );

@@ -3,7 +3,6 @@ import pool from "../config/db.js";
 // ==========================================
 // HELPER 1: THE REUSABLE SQL QUERY
 // ==========================================
-// We explicitly list the user fields to ensure both login and getUserById get the exact same data.
 const BASE_USER_QUERY = `
   SELECT 
     u.id, u.fullname, u.email, u.password, u.role_id, u.payrate, u.position, u.branch, u."isActive", u.profile_picture, u.daily_rate,
@@ -28,7 +27,9 @@ const BASE_USER_QUERY = `
     -- Payroll
     r.perm_payroll_view, r.perm_payroll_view_all, r.perm_payroll_manage, r.perm_payroll_approve,
     -- Role Management
-    r.perm_role_view, r.perm_role_manage
+    r.perm_role_view, r.perm_role_manage,
+    -- Events (NEW)
+    r.perm_event_view, r.perm_event_manage
   FROM users u 
   LEFT JOIN roles r ON u.role_id = r.id
 `;
@@ -78,10 +79,14 @@ const formatUserRecord = (user) => {
     perm_payroll_view: user.perm_payroll_view,
     perm_payroll_view_all: user.perm_payroll_view_all,
     perm_payroll_manage: user.perm_payroll_manage,
+    // Payroll Approve
     perm_payroll_approve: user.perm_payroll_approve,
-    // Role
+    // Role Management
     perm_role_view: user.perm_role_view,
     perm_role_manage: user.perm_role_manage,
+    // Events (NEW)
+    perm_event_view: user.perm_event_view,
+    perm_event_manage: user.perm_event_manage,
   };
 
   // 3. CLEANUP: Delete the raw duplicate keys from the root object
